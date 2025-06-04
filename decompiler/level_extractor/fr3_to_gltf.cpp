@@ -244,10 +244,10 @@ int make_color_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& verti
 
   for (size_t i = 0; i < vertices.size(); i++) {
     for (int j = 0; j < 3; j++) {
-      floats.push_back(((float)tfrag_tree.colors.read(vertices[i].color_index, time_of_day, j)) /
-                       255.f);
+      floats.push_back(((float)tfrag_tree.colors.read(vertices[i].color_index, time_of_day, j)) / 255.f);
     }
-    floats.push_back(1.f);
+    floats.push_back(((float)tfrag_tree.colors.read(vertices[i].color_index, time_of_day, 3)) / 255.f);
+    //floats.push_back(1.f);
   }
   memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
 
@@ -267,6 +267,8 @@ int make_color_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& verti
   accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
   accessor.count = vertices.size();
   accessor.type = TINYGLTF_TYPE_VEC4;
+  accessor.maxValues = {1, 1, 1};
+  accessor.minValues = {0, 0, 0};
 
   return accessor_idx;
 }
@@ -287,9 +289,9 @@ int make_color_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& verti
 
   for (size_t i = 0; i < vertices.size(); i++) {
     for (int j = 0; j < 3; j++) {
-      floats.push_back(((float)tie_tree.colors.read(vertices[i].color_index, time_of_day, j)) /
-                       255.f);
+      floats.push_back(((float)tie_tree.colors.read(vertices[i].color_index, time_of_day, j)) / 255.f);
     }
+    //floats.push_back(((float)tie_tree.colors.read(vertices[i].color_index, time_of_day, 4)) / 128.f);
     floats.push_back(1.f);
   }
   memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
@@ -310,6 +312,8 @@ int make_color_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& verti
   accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
   accessor.count = vertices.size();
   accessor.type = TINYGLTF_TYPE_VEC4;
+  accessor.maxValues = {1, 1, 1};
+  accessor.minValues = {0, 0, 0};
 
   return accessor_idx;
 }
@@ -346,6 +350,8 @@ int make_color_buffer_accessor(const std::vector<tfrag3::MercVertex>& vertices,
   accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
   accessor.count = vertices.size();
   accessor.type = TINYGLTF_TYPE_VEC4;
+  accessor.maxValues = {1, 1, 1};
+  accessor.minValues = {0, 0, 0};
 
   return accessor_idx;
 }
@@ -390,6 +396,8 @@ int make_color_buffer_accessor(const std::vector<tfrag3::ShrubGpuVertex>& vertic
   accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
   accessor.count = vertices.size();
   accessor.type = TINYGLTF_TYPE_VEC4;
+  accessor.maxValues = {1, 1, 1};
+  accessor.minValues = {0, 0, 0};
 
   return accessor_idx;
 }
@@ -577,7 +585,7 @@ int add_material_for_tex(const tfrag3::Level& level,
 
   mat.doubleSided = true;
   // the 2.0 here compensates for the ps2's weird blending where 0.5 behaves like 1.0
-  mat.pbrMetallicRoughness.baseColorFactor = {2.0, 2.0, 2.0, 2.0};
+  mat.pbrMetallicRoughness.baseColorFactor = {1.0, 1.0, 1.0, 1.0};
   mat.pbrMetallicRoughness.baseColorTexture.texCoord = 0;  // TEXCOORD_0, I think
   mat.pbrMetallicRoughness.baseColorTexture.index = model.textures.size();
   mat.alphaMode = draw_mode.get_ab_enable() ? "BLEND" : "MASK";
@@ -602,7 +610,7 @@ int add_material_for_tex(const tfrag3::Level& level,
   return mat_idx;
 }
 
-constexpr int kMaxColor = 1;
+const int kMaxColor = 8;
 /*!
  * Add the given tfrag data to a node under tfrag_root.
  */
