@@ -763,9 +763,16 @@
      ;; do nothing!
      )
     (else
+    (format #t "                                ~A Splitboxes:~%" (-> this name))
+    (format #t "[~%")
      (let* ((s3-0 (-> this bsp boxes))
             (s2-0 (-> s3-0 data)))
        (dotimes (s1-0 (-> s3-0 length))
+       (format #t "{~%")
+       (format #t "\"name\": \"splitbox-~D\",~%" (-> this bsp split-box-indices s1-0) )
+       (format #t "\"min\": [~M, ~M, ~M],~%" (- (-> s2-0 0 max x)) (-> s2-0 0 min y) (-> s2-0 0 min z))
+       (format #t "\"max\": [~M, ~M, ~M]~%" (- (-> s2-0 0 min x)) (-> s2-0 0 max y) (-> s2-0 0 max z))
+       (format #t "},~%")
          (if (and (>= (-> arg0 x) (-> s2-0 0 min x))
                   (>= (-> arg0 y) (-> s2-0 0 min y))
                   (>= (-> arg0 z) (-> s2-0 0 min z))
@@ -773,7 +780,8 @@
                   (< (-> arg0 y) (-> s2-0 0 max y))
                   (< (-> arg0 z) (-> s2-0 0 max z)))
            (format arg1 "    splitbox-~D~%" (-> this bsp split-box-indices s1-0)))
-         (set! s2-0 (the (inline-array box8s) (-> s2-0 1)))))))
+         (set! s2-0 (the (inline-array box8s) (-> s2-0 1)))))
+         (format #t "]~%")))
   0
   (none))
 
