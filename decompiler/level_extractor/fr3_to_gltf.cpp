@@ -484,6 +484,42 @@ int make_shrub_color_buffer_accessor(const std::vector<tfrag3::ShrubGpuVertex>& 
   return accessor_idx;
 }
 
+int make_normal_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& vertices,
+                                tinygltf::Model& model) {
+  // first create a buffer:
+  int buffer_idx = (int)model.buffers.size();
+  auto& buffer = model.buffers.emplace_back();
+  buffer.data.resize(sizeof(float) * 3 * vertices.size());
+  std::vector<float> floats;
+
+  // and fill it
+  for (size_t i = 0; i < vertices.size(); i++) {
+    floats.push_back(unpack_s10(vertices[i].nor));
+    floats.push_back(unpack_s10(vertices[i].nor >> 10));
+    floats.push_back(unpack_s10(vertices[i].nor >> 20));
+  }
+  memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
+
+  // create a view of this buffer
+  int buffer_view_idx = (int)model.bufferViews.size();
+  auto& buffer_view = model.bufferViews.emplace_back();
+  buffer_view.buffer = buffer_idx;
+  buffer_view.byteOffset = 0;
+  buffer_view.byteLength = buffer.data.size();
+  buffer_view.byteStride = 0;  // tightly packed
+  buffer_view.target = TINYGLTF_TARGET_ARRAY_BUFFER;
+
+  int accessor_idx = (int)model.accessors.size();
+  auto& accessor = model.accessors.emplace_back();
+  accessor.bufferView = buffer_view_idx;
+  accessor.byteOffset = 0;
+  accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+  accessor.count = vertices.size();
+  accessor.type = TINYGLTF_TYPE_VEC3;
+
+  return accessor_idx;
+}
+
 /*!
  * Create a tinygltf buffer and buffer view for indices, and convert to gltf format.
  * The map can be used to go from slots in the old index buffer to new.
