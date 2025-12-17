@@ -905,6 +905,7 @@ int add_material_for_tex(const tfrag3::Level& level,
   auto& mat = model.materials.emplace_back();
   auto& tex = level.textures.at(tex_idx);
 
+  mat.name = fmt::format("{}-{}", tex.debug_name, fmt::format("{:x}", draw_mode.as_int()));
   mat.doubleSided = true;
   // the 2.0 here compensates for the ps2's weird blending where 0.5 behaves like 1.0
   mat.pbrMetallicRoughness.baseColorFactor = {1.0, 1.0, 1.0, 1.0};
