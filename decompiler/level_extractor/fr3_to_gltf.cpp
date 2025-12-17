@@ -655,6 +655,100 @@ int make_shrub_index_buffer_view(const std::vector<u32>& indices,
   return buffer_view_idx;
 }
 
+int make_shrub_index_buffer_view_grouped(const std::vector<u32>& indices,
+                                         const std::vector<tfrag3::ShrubDraw>& draws,
+                                         const std::vector<tfrag3::PackedShrubVertices::InstanceGroup>& groups,
+                                         tinygltf::Model& model,
+                                         std::vector<std::vector<u32>>& draw_to_starts,
+                                         std::vector<std::vector<u32>>& draw_to_counts,
+                                         std::vector<std::vector<u32>>& draw_to_group_ids) {
+  // Build group offsets in the expanded (unpacked) vertex ordering.
+  std::vector<u32> group_offsets;
+  group_offsets.reserve(groups.size());
+  u32 running = 0;
+  for (const auto& g : groups) {
+    group_offsets.push_back(running);
+    u32 size = g.end_vert - g.start_vert;
+    running += size;
+  }
+
+  auto find_group = [&](u32 vtx_idx) -> int {
+    // binary search the group_offsets to find greatest offset <= vtx_idx
+    int lo = 0;
+    int hi = (int)group_offsets.size() - 1;
+    if (group_offsets.empty()) return -1;
+    if (vtx_idx < group_offsets[0]) return -1;
+    while (lo <= hi) {
+      int mid = (lo + hi) / 2;
+      u32 off = group_offsets[mid];
+      u32 next_off = (mid + 1 < (int)group_offsets.size()) ? group_offsets[mid + 1] : running;
+      if (vtx_idx >= off && vtx_idx < next_off) return mid;
+      if (vtx_idx < off) hi = mid - 1;
+      else lo = mid + 1;
+    }
+    return -1;
+  };
+
+  std::vector<u32> unstripped;
+
+  // For each draw, collect triangles per group, then append them so they are grouped
+  // (draw -> group -> triangles). This mirrors the tie wind exporter behavior.
+  draw_to_starts.resize(draws.size());
+  draw_to_counts.resize(draws.size());
+  draw_to_group_ids.resize(draws.size());
+
+  for (size_t d = 0; d < draws.size(); d++) {
+    const auto& draw = draws[d];
+
+    // temporary buckets per group (only push for groups that get tris)
+    std::vector<std::vector<u32>> per_group(groups.size());
+
+    // iterate over the raw index stream for this draw (strip-format)
+    for (size_t i = 2; i < draw.num_indices; i++) {
+      int idx = (int)(i + draw.first_index_index);
+      u32 a = indices[idx];
+      u32 b = indices[idx - 1];
+      u32 c = indices[idx - 2];
+      if (a == UINT32_MAX || b == UINT32_MAX || c == UINT32_MAX) {
+        continue;
+      }
+      int ga = find_group(a);
+      int gb = find_group(b);
+      int gc = find_group(c);
+      // triangles should all come from same group. If not, put them in group 0 as fallback.
+      int gid = (ga == gb && gb == gc) ? ga : (ga >= 0 ? ga : (gb >= 0 ? gb : gc));
+      if (gid < 0) continue;
+      per_group[gid].push_back(a);
+      per_group[gid].push_back(b);
+      per_group[gid].push_back(c);
+    }
+
+    // now append groups that have data into the main unstripped buffer, record starts/counts
+    for (size_t g = 0; g < per_group.size(); g++) {
+      if (per_group[g].empty()) continue;
+      draw_to_group_ids[d].push_back((u32)g);
+      draw_to_starts[d].push_back(unstripped.size());
+      draw_to_counts[d].push_back(per_group[g].size());
+      unstripped.insert(unstripped.end(), per_group[g].begin(), per_group[g].end());
+    }
+  }
+
+  // create buffer and bufferView
+  int buffer_idx = (int)model.buffers.size();
+  auto& buffer = model.buffers.emplace_back();
+  buffer.data.resize(sizeof(u32) * unstripped.size());
+  memcpy(buffer.data.data(), unstripped.data(), buffer.data.size());
+
+  int buffer_view_idx = (int)model.bufferViews.size();
+  auto& buffer_view = model.bufferViews.emplace_back();
+  buffer_view.buffer = buffer_idx;
+  buffer_view.byteOffset = 0;
+  buffer_view.byteLength = buffer.data.size();
+  buffer_view.byteStride = 0;
+  buffer_view.target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
+  return buffer_view_idx;
+}
+
 int make_merc_index_buffer_view(const std::vector<u32>& indices,
                                 const tfrag3::MercModel& mmodel,
                                 tinygltf::Model& model,
@@ -935,44 +1029,72 @@ void add_tie(const tfrag3::Level& level,
 void add_shrub(const tfrag3::Level& level,
                const tfrag3::ShrubTree& shrub_in,
                tinygltf::Model& model,
-               std::unordered_map<int, int>& tex_image_map) {
+               std::unordered_map<int, int>& tex_image_map,
+               u32 index) {
   // copy and unpack in place
   tfrag3::ShrubTree shrub = shrub_in;
-  shrub.unpack();
+  shrub.unpackExtractor();
 
   // we'll make a Node, Mesh, Primitive, then add the data to the primitive.
   int node_idx = (int)model.nodes.size();
   auto& node = model.nodes.emplace_back();
   model.scenes.at(0).nodes.push_back(node_idx);
+  node.name = fmt::format("Shrub_Tree_{}", index);
 
-  int mesh_idx = (int)model.meshes.size();
-  auto& mesh = model.meshes.emplace_back();
-  node.mesh = mesh_idx;
 
   int position_buffer_accessor = make_position_buffer_accessor(shrub.unpacked.vertices, model);
-  int texture_buffer_accessor =
-      make_tex_buffer_accessor(shrub.unpacked.vertices, model, 1.f / 4096.f);
-  std::vector<u32> draw_to_start, draw_to_count;
-  int index_buffer_view = make_shrub_index_buffer_view(shrub.indices, shrub.static_draws, model,
-                                                       draw_to_start, draw_to_count);
+  int texture_buffer_accessor = make_tex_buffer_accessor(shrub.unpacked.vertices, model, 1.f / 4096.f);
   int colors[kMaxColor];
   for (int i = 0; i < kMaxColor; i++) {
     colors[i] = make_color_buffer_accessor(shrub.unpacked.vertices, model, shrub, i);
   }
+  int base_color_accessor = make_shrub_color_buffer_accessor(shrub.unpacked.vertices, model);
 
-  // for (auto& draw : shrub.static_draws) {
+  std::vector<std::vector<u32>> draw_to_starts, draw_to_counts, draw_to_group_ids;
+  int index_buffer_view = make_shrub_index_buffer_view_grouped(shrub.indices, shrub.static_draws,
+                                                               shrub.packed_vertices.instance_groups,
+                                                               model, draw_to_starts,
+                                                               draw_to_counts, draw_to_group_ids);
+
   for (size_t draw_idx = 0; draw_idx < shrub.static_draws.size(); draw_idx++) {
-    auto& draw = shrub.static_draws[draw_idx];
-    auto& prim = mesh.primitives.emplace_back();
-    prim.material = add_material_for_tex(level, model, draw.tree_tex_id, tex_image_map, draw.mode);
-    prim.indices = make_index_buffer_accessor(model, draw_to_start.at(draw_idx),
-                                              draw_to_count.at(draw_idx), index_buffer_view);
-    prim.attributes["POSITION"] = position_buffer_accessor;
-    prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
-    for (int i = 0; i < kMaxColor; i++) {
-      prim.attributes[fmt::format("COLOR_{}", i)] = colors[i];
+    const auto& draw = shrub.static_draws[draw_idx];
+    int mat = add_material_for_tex(level, model, draw.tree_tex_id, tex_image_map, draw.mode);
+
+    for (size_t local_grp = 0; local_grp < draw_to_starts[draw_idx].size(); local_grp++) {
+      u32 start = draw_to_starts[draw_idx][local_grp];
+      u32 count = draw_to_counts[draw_idx][local_grp];
+      u32 group_id = draw_to_group_ids[draw_idx][local_grp];
+
+      int c_node_idx = (int)model.nodes.size();
+      auto& c_node = model.nodes.emplace_back();
+      model.nodes[node_idx].children.push_back(c_node_idx);
+      int c_mesh_idx = (int)model.meshes.size();
+      auto& c_mesh = model.meshes.emplace_back();
+      c_node.mesh = c_mesh_idx;
+      ASSERT(draw.proto_idx < shrub.proto_names.size());
+      c_node.name = fmt::format("Shrub_{}_{}_{}", shrub.proto_names[draw.proto_idx], draw_idx, group_id);
+
+      const auto& inst_grp = shrub.packed_vertices.instance_groups.at(group_id);
+      const auto& info = shrub.packed_vertices.matrices.at(inst_grp.matrix_idx);
+
+      for (int i = 0; i < 4; i++) {
+        float scale = i == 3 ? (1.f / 4096.f) : 1.f;
+        for (int j = 0; j < 4; j++) {
+          c_node.matrix.push_back(scale * info[i][j]);
+        }
+      }
+
+      auto& prim = c_mesh.primitives.emplace_back();
+      prim.material = mat;
+      prim.indices = make_index_buffer_accessor(model, start, count, index_buffer_view);
+      prim.attributes["POSITION"] = position_buffer_accessor;
+      prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
+      for (int i = 0; i < kMaxColor; i++) {
+        prim.attributes[fmt::format("COLOR_{}", i)] = colors[i];
+      }
+      prim.attributes[fmt::format("COLOR_{}", kMaxColor + 0)] = base_color_accessor;
+      prim.mode = TINYGLTF_MODE_TRIANGLES;
     }
-    prim.mode = TINYGLTF_MODE_TRIANGLES;
   }
 }
 

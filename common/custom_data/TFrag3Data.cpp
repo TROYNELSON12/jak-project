@@ -347,6 +347,29 @@ void ShrubTree::unpack() {
   ASSERT(i == unpacked.vertices.size());
 }
 
+void ShrubTree::unpackExtractor() {
+  unpacked.vertices.resize(packed_vertices.total_vertex_count);
+  size_t i = 0;
+
+  for (const auto& grp : packed_vertices.instance_groups) {
+    //const auto& mat = packed_vertices.matrices[grp.matrix_idx];
+    for (u32 src_idx = grp.start_vert; src_idx < grp.end_vert; src_idx++) {
+      auto& vtx = unpacked.vertices[i];
+      vtx.color_index = grp.color_index;
+      const auto& proto_vtx = packed_vertices.vertices[src_idx];
+      //auto temp = mat[0] * proto_vtx.x + mat[1] * proto_vtx.y + mat[2] * proto_vtx.z + mat[3];
+      vtx.x = proto_vtx.x;
+      vtx.y = proto_vtx.y;
+      vtx.z = proto_vtx.z;
+      vtx.s = proto_vtx.s;
+      vtx.t = proto_vtx.t;
+      memcpy(vtx.rgba_base, proto_vtx.rgba, 3);
+      i++;
+    }
+  }
+  ASSERT(i == unpacked.vertices.size());
+}
+
 void TfragTree::unpack() {
   unpacked.vertices.resize(packed_vertices.vertices.size());
   for (size_t i = 0; i < unpacked.vertices.size(); i++) {

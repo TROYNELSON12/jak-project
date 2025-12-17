@@ -473,6 +473,7 @@ struct ShrubTree {
   void serialize(Serializer& ser);
   void memory_usage(MemoryUsageTracker* tracker) const;
   void unpack();
+  void unpackExtractor();
 };
 
 struct HfragmentVertex {
