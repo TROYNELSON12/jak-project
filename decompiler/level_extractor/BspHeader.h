@@ -161,10 +161,52 @@ struct Res {
   goos::Object script;
 };
 
+struct Nav_Poly {
+  u8 id;
+  u8 vertex[3];
+  u8 adj_poly[3];
+  u8 pat;
+};
+
+struct Nav_Sphere {
+  Vector trans;
+};
+
+struct Nav_Node {
+  float center_x;
+  float center_y;
+  float center_z;
+  uint16_t type;
+  uint16_t parent_offset;
+  float radius_x;
+  float radius_y;
+  float radius_z;
+  uint16_t left_offset;
+  uint16_t right_offset;
+  float scale_x;
+  uint8_t first_tris[4];
+  float scale_z;
+  uint8_t last_tris[4];
+};
+
+struct Nav_Mesh {
+  bool exists = false;
+  u8 static_sphere_count;
+  std::vector<Nav_Sphere> static_sphere;
+  Vector bounds;
+  Vector origin;
+  int node_count;
+  std::vector<Nav_Node> nodes;
+  int vertex_count;
+  std::vector<Vector> vertex;
+  int poly_count;
+  std::vector<Nav_Poly> poly;
+};
+
 struct EntityActor {
   Vector trans;
   u32 aid = 0;
-  // nav mesh
+  Nav_Mesh nav_mesh;
   std::string etype;
   int task = 0;
   u16 vis_id = 0;
@@ -214,6 +256,8 @@ struct DrawableAmbient : public Drawable {
   std::string my_type() const override { return "drawable-ambient"; }
 };
 
+
+
 struct DrawableTreeActor : public DrawableTree {
   void read_from_file(TypedRef ref,
                       const decompiler::DecompilerTypeSystem& dts,
@@ -228,6 +272,12 @@ struct DrawableTreeActor : public DrawableTree {
 
   std::vector<std::unique_ptr<DrawableInlineArray>> arrays;
 };
+
+/////////////////////
+// Regions
+/////////////////////
+
+
 
 /////////////////////
 // Collision

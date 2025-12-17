@@ -1859,6 +1859,59 @@ void EntityActor::read_from_file(TypedRef ref,
                                  GameVersion /*version*/) {
   trans.read_from_file(get_field_ref(ref, "trans", dts));
   aid = read_plain_data_field<u32>(ref, "aid", dts);
+
+  if (get_word_kind_for_field(ref, "nav-mesh", dts) == decompiler::LinkedWord::PTR) {
+    nav_mesh.exists = true;
+    TypedRef NavTRef = get_and_check_ref_to_basic(ref, "nav-mesh", "nav-mesh", dts);
+
+
+    //Spent couple hours trying to find why static-sphere was always empty,
+    //they get populated at runtime from the lump. :HuTaoFacePalm:
+
+    nav_mesh.bounds.read_from_file(get_field_ref(NavTRef, "bounds", dts));
+    nav_mesh.origin.read_from_file(get_field_ref(NavTRef, "origin", dts));
+
+
+    nav_mesh.node_count = read_plain_data_field<int>(NavTRef, "node-count", dts);
+    nav_mesh.nodes.reserve(nav_mesh.vertex_count);
+    Ref NodesRef = deref_label(get_field_ref(NavTRef, "nodes", dts));
+    NodesRef.byte_offset += 16;  // Skip inline array header
+    for (int i = 0; i < nav_mesh.node_count; i++) {
+      auto& node = nav_mesh.nodes.emplace_back();
+      memcpy_plain_data(reinterpret_cast<u8*>(&node), NodesRef, sizeof(Nav_Node));
+      // Advance pointer
+      NodesRef.byte_offset += 16;
+    }
+
+
+    nav_mesh.vertex_count = read_plain_data_field<int>(NavTRef, "vertex-count", dts);
+    nav_mesh.vertex.reserve(nav_mesh.vertex_count);
+    Ref VertRef = deref_label(get_field_ref(NavTRef, "vertex", dts));
+    VertRef.byte_offset += 16;  //Skip inline array header
+    for (int i = 0; i < nav_mesh.vertex_count; i++) {
+      auto& vert = nav_mesh.vertex.emplace_back();
+      memcpy_plain_data(reinterpret_cast<u8*>(vert.data), VertRef, sizeof(Vector));
+      //Advance pointer
+      VertRef.byte_offset += 16;
+    }
+
+
+    nav_mesh.poly_count = read_plain_data_field<int>(NavTRef, "poly-count", dts);
+    nav_mesh.poly.reserve(nav_mesh.poly_count);
+    Ref PolyRef = deref_label(get_field_ref(NavTRef, "poly", dts));
+    PolyRef.byte_offset += 16;  // Skip inline array header
+    for (int i = 0; i < nav_mesh.poly_count; i++) {
+      TypedRef PolyTRef(PolyRef, dts.ts.lookup_type("nav-poly"));
+      auto& poly = nav_mesh.poly.emplace_back();
+      poly.id = read_plain_data_field<u8>(PolyTRef, "id", dts);
+      memcpy_plain_data(reinterpret_cast<u8*>(poly.vertex), PolyRef, 3);
+      memcpy_plain_data(reinterpret_cast<u8*>(poly.adj_poly), PolyRef, 3);
+      poly.pat = read_plain_data_field<u8>(PolyTRef, "pat", dts);
+      // Advance pointer
+      PolyRef.byte_offset += 8;
+    }
+  }
+
   etype = read_type_field(ref, "etype", dts, false);
   task = read_plain_data_field<u8>(ref, "task", dts);
   vis_id = read_plain_data_field<u16>(ref, "vis-id", dts);
