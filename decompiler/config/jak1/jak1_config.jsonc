@@ -53,6 +53,9 @@
   // write out a json file containing tpage and texture mappings, run with all objects allowed
   "dump_tex_info": false,
 
+  // set to false to skip adding .STR files to the decompiler database
+  "read_spools": false,
+
   ///////////////////////////
   // WEIRD OPTIONS
   ///////////////////////////

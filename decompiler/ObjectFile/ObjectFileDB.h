@@ -320,6 +320,20 @@ class ObjectFileDB {
     }
   }
 
+  // Const-qualified variant for read-only traversal
+  template <typename Func>
+  void for_each_obj_in_dgo(const std::string& dgo_name, Func f) const {
+    ASSERT(obj_files_by_name.size() == obj_file_order.size());
+    if (obj_files_by_dgo.count(dgo_name) > 0) {
+      const auto& dgo_objs = obj_files_by_dgo.at(dgo_name);
+      for (const auto& rec : dgo_objs) {
+        for (const auto& obj : obj_files_by_name.at(rec.name)) {
+          f(obj);
+        }
+      }
+    }
+  }
+
   /*!
    * Apply f to all functions
    * takes (Function, segment, linked_data)

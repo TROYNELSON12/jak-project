@@ -59,6 +59,7 @@ add_library(
         level_extractor/extract_collide_frags.cpp
         level_extractor/extract_common.cpp
         level_extractor/extract_hfrag.cpp
+        level_extractor/extract_joint_anim.cpp
         level_extractor/extract_joint_group.cpp
         level_extractor/extract_level.cpp
         level_extractor/extract_merc.cpp

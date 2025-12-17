@@ -453,18 +453,22 @@ void ObjectFileDB::add_obj_from_dgo(const std::string& obj_name,
   data.name_in_dgo = name_in_dgo;
   data.obj_version = version;
   if (!dgo_obj_name_map.empty()) {
-    auto dgo_kv = dgo_obj_name_map.find(strip_dgo_extension(dgo_name));
-    if (dgo_kv == dgo_obj_name_map.end()) {
-      lg::error("Object {} is from DGO {}, but this DGO was not in the map.", obj_name, dgo_name);
-      ASSERT(false);
-    }
+    // Skip map lookup for spool DGOs since they aren't included in the map file
+    bool is_spool_dgo = (dgo_name == "ALLSPOOL" || dgo_name == "TEXSPOOL" || dgo_name == "ARTSPOOL");
+    if (!is_spool_dgo) {
+      auto dgo_kv = dgo_obj_name_map.find(strip_dgo_extension(dgo_name));
+      if (dgo_kv == dgo_obj_name_map.end()) {
+        lg::error("Object {} is from DGO {}, but this DGO was not in the map.", obj_name, dgo_name);
+        ASSERT(false);
+      }
 
-    auto name_kv = dgo_kv->second.find(obj_name);
-    if (name_kv == dgo_kv->second.end()) {
-      lg::error("Object {} from DGO {} was not found in the name map.", obj_name, dgo_name);
-      ASSERT(false);
+      auto name_kv = dgo_kv->second.find(obj_name);
+      if (name_kv == dgo_kv->second.end()) {
+        lg::error("Object {} from DGO {} was not found in the name map.", obj_name, dgo_name);
+        ASSERT(false);
+      }
+      data.name_from_map = name_kv->second;
     }
-    data.name_from_map = name_kv->second;
   }
   obj_files_by_dgo[dgo_name].push_back(data.record);
   obj_files_by_name[obj_name].emplace_back(std::move(data));

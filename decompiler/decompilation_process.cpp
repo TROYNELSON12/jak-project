@@ -211,11 +211,13 @@ int run_decompilation_process(decompiler::Config config,
 
   lg::info("[Mem] After text: {} MB", get_peak_rss() / (1024 * 1024));
 
-  if (config.process_subtitle_text || config.process_subtitle_images) {
-    auto result = db.process_all_spool_subtitles(
-        config, config.process_subtitle_images ? out_folder / "assets" / "subtitle-images" : "");
-    if (!result.empty()) {
-      file_util::write_text_file(out_folder / "assets" / "game_subs.txt", result);
+  if (config.game_version > GameVersion::Jak1) {
+    if (config.process_subtitle_text || config.process_subtitle_images) {
+      auto result = db.process_all_spool_subtitles(
+          config, config.process_subtitle_images ? out_folder / "assets" / "subtitle-images" : "");
+      if (!result.empty()) {
+        file_util::write_text_file(out_folder / "assets" / "game_subs.txt", result);
+      }
     }
   }
 

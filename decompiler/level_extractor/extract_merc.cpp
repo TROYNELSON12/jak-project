@@ -1681,7 +1681,8 @@ void extract_merc(const ObjectFileData& ag_data,
                   tfrag3::Level& out,
                   bool dump_level,
                   GameVersion version,
-                  MercSwapInfo& swapped_info) {
+                  MercSwapInfo& swapped_info,
+                  std::map<std::string, level_tools::ArtData>& art_group_data) {
   if (dump_level) {
     file_util::create_dir_if_needed(file_util::get_file_path({"debug_out/merc"}));
   }
@@ -1693,6 +1694,9 @@ void extract_merc(const ObjectFileData& ag_data,
   for (auto location : ctrl_locations) {
     auto ctrl = extract_merc_ctrl(ag_data.linked_data, dts, location);
     ctrls.push_back(ctrl);
+    // Store blend target counts for blerc extraction
+    art_group_data[ag_data.name_in_dgo].blerc_blend_target_count =
+        ctrl.header.blend_target_count;
   }
 
   // extract draws. this does no regrouping yet.

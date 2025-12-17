@@ -249,8 +249,9 @@ bool run_build_level(const std::string& input_file,
             const auto& ag_file = db.lookup_record(ag);
             lg::info("custom level: extracting art group {}", ag_file.name_in_dgo);
             decompiler::MercSwapInfo info;
+            std::map<std::string, level_tools::ArtData> art_group_data;
             decompiler::extract_merc(ag_file, tex_db, db.dts, tex_remap, pc_level, false,
-                                     db.version(), info);
+                                     db.version(), info, art_group_data);
           }
         }
       }

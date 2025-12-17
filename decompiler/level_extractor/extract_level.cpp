@@ -1,5 +1,6 @@
 #include "extract_level.h"
 
+#include <map>
 #include <set>
 #include <thread>
 
@@ -14,6 +15,7 @@
 #include "decompiler/level_extractor/extract_collide_frags.h"
 #include "decompiler/level_extractor/extract_hfrag.h"
 #include "decompiler/level_extractor/extract_joint_group.h"
+#include "decompiler/level_extractor/extract_joint_anim.h"
 #include "decompiler/level_extractor/extract_merc.h"
 #include "decompiler/level_extractor/extract_shrub.h"
 #include "decompiler/level_extractor/extract_tfrag.h"
@@ -22,6 +24,28 @@
 #include "goalc/build_actor/jak1/build_actor.h"
 
 namespace decompiler {
+
+namespace {
+void merge_art_group_data(std::map<std::string, level_tools::ArtData>& dest,
+                          const std::map<std::string, level_tools::ArtData>& src) {
+  for (const auto& [name, data] : src) {
+    auto& out = dest[name];
+    if (out.art_group_name.empty()) {
+      out.art_group_name = data.art_group_name;
+    }
+    if (out.art_name.empty()) {
+      out.art_name = data.art_name;
+    }
+    if (out.joint_group.empty() && !data.joint_group.empty()) {
+      out.joint_group = data.joint_group;
+    }
+    if (out.blerc_blend_target_count == 0 && data.blerc_blend_target_count != 0) {
+      out.blerc_blend_target_count = data.blerc_blend_target_count;
+    }
+    out.joint_anims.insert(out.joint_anims.end(), data.joint_anims.begin(), data.joint_anims.end());
+  }
+}
+}  // namespace
 
 /*!
  * Look through files in a DGO and find the bsp-header file (the level)
@@ -127,11 +151,26 @@ void extract_art_groups_from_level(const ObjectFileDB& db,
       if (file.name.length() > 3 && !file.name.compare(file.name.length() - 3, 3, "-ag")) {
         const auto& ag_file = db.lookup_record(file);
         extract_merc(ag_file, tex_db, db.dts, tex_remap, level_data, false, db.version(),
-                     swapped_info);
+                     swapped_info, art_group_data);
         extract_joint_group(ag_file, db.dts, db.version(), art_group_data);
+        extract_joint_anim(ag_file, db.dts, db.version(), art_group_data, false);
       }
     }
+    export_anim_as_json(level_data.level_name, db.version(), art_group_data, false);
   }
+}
+
+void extract_art_groups_from_stream(const ObjectFileDB& db,
+                                    const std::string& dgo_name,
+                                    std::string level_name,
+                                    std::map<std::string, level_tools::ArtData>& art_group_data) {
+  const auto& files = db.obj_files_by_dgo.at(dgo_name);
+  lg::info("Extracting {} streaming animations from {}", files.size(), dgo_name);
+  for (const auto& file : files) {
+    const auto& ag_file = db.lookup_record(file);
+    extract_joint_anim(ag_file, db.dts, db.version(), art_group_data, true);
+  }
+  export_anim_as_json("allspool", db.version(), art_group_data, true);
 }
 
 std::vector<level_tools::TextureRemap> extract_tex_remap(const ObjectFileDB& db,
@@ -265,19 +304,19 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
  * Even though GAME.CGO isn't technically a level, the decompiler/loader treat it like one,
  * but the bsp stuff is just empty. It will contain only textures/art groups.
  */
-void extract_common(const ObjectFileDB& db,
-                    const TextureDB& tex_db,
-                    const std::string& dgo_name,
-                    const fs::path& output_folder,
-                    const Config& config) {
+std::map<std::string, level_tools::ArtData> extract_common(const ObjectFileDB& db,
+                                                           const TextureDB& tex_db,
+                                                           const std::string& dgo_name,
+                                                           const fs::path& output_folder,
+                                                           const Config& config) {
   if (db.obj_files_by_dgo.count(dgo_name) == 0) {
     lg::warn("Skipping common extract for {} because the DGO was not part of the input", dgo_name);
-    return;
+    return {};
   }
 
   if (tex_db.textures.size() == 0) {
     lg::warn("Skipping common extract because there were no textures in the input");
-    return;
+    return {};
   }
 
   confirm_textures_identical(tex_db);
@@ -343,6 +382,8 @@ void extract_common(const ObjectFileDB& db,
                      game_version_names[config.game_version] / "levels" / "common";
     save_level_foreground_as_gltf(tfrag_level, art_group_data, file_path);
   }
+
+  return art_group_data;
 }
 
 void extract_from_level(const ObjectFileDB& db,
@@ -350,7 +391,8 @@ void extract_from_level(const ObjectFileDB& db,
                         const std::string& dgo_name,
                         const Config& config,
                         const fs::path& output_folder,
-                        const fs::path& entities_folder) {
+                        const fs::path& entities_folder,
+                        std::map<std::string, level_tools::ArtData>& out_art_group_data) {
   if (db.obj_files_by_dgo.count(dgo_name) == 0) {
     lg::warn("Skipping extract for {} because the DGO was not part of the input", dgo_name);
     return;
@@ -393,6 +435,12 @@ void extract_from_level(const ObjectFileDB& db,
     file_util::write_text_file(
         entities_folder / fmt::format("{}-ambients.json", level_data.level_name),
         extract_ambients_to_json(bsp_header.ambients));
+  if (config.game_version >= GameVersion::Jak2)
+    file_util::write_text_file(
+        entities_folder / fmt::format("{}-regions.json", level_data.level_name),
+        extract_ambients_to_json(bsp_header.ambients));
+
+  out_art_group_data = std::move(art_group_data);
 }
 
 void extract_all_levels(const ObjectFileDB& db,
@@ -401,17 +449,39 @@ void extract_all_levels(const ObjectFileDB& db,
                         const std::string& common_name,
                         const Config& config,
                         const fs::path& output_path) {
-  extract_common(db, tex_db, common_name, output_path, config);
+  auto common_art_data = extract_common(db, tex_db, common_name, output_path, config);
   auto entities_dir = file_util::get_jak_project_dir() / "decompiler_out" /
                       game_version_names[config.game_version] / "entities";
   file_util::create_dir_if_needed(entities_dir);
+
+  std::vector<std::map<std::string, level_tools::ArtData>> level_art_data(dgo_names.size());
   SimpleThreadGroup threads;
   threads.run(
       [&](int idx) {
-        extract_from_level(db, tex_db, dgo_names[idx], config, output_path, entities_dir);
+        extract_from_level(db, tex_db, dgo_names[idx], config, output_path, entities_dir,
+                           level_art_data[idx]);
       },
       dgo_names.size());
   threads.join();
+
+  std::map<std::string, level_tools::ArtData> aggregated_art_data;
+  merge_art_group_data(aggregated_art_data, common_art_data);
+  for (const auto& level_data : level_art_data) {
+    merge_art_group_data(aggregated_art_data, level_data);
+  }
+
+  if (db.obj_files_by_dgo.count("ALLSPOOL")) {
+
+    // start with all known art groups so streaming anims can link to their models
+    auto spool_art_data = aggregated_art_data;
+    for (auto& [_, data] : spool_art_data) {
+      data.joint_anims.clear();
+    }
+
+    extract_art_groups_from_stream(db, "ALLSPOOL", "allspool", spool_art_data);
+  } else {
+    lg::info("ALLSPOOL not present; skipping streaming animation extraction.");
+  }
 }
 
 }  // namespace decompiler
