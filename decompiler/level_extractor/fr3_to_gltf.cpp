@@ -108,6 +108,7 @@ void unstrip_tie_wind(std::vector<u32>& unstripped,
  */
 void unstrip_merc_draws(const std::vector<u32>& stripped_indices,
                         const tfrag3::MercModel& model,
+                        const std::vector<tfrag3::MercVertex>& vertices,
                         std::vector<u32>& unstripped,
                         std::vector<std::vector<u32>>& draw_to_start,
                         std::vector<std::vector<u32>>& draw_to_count) {
@@ -125,9 +126,34 @@ void unstrip_merc_draws(const std::vector<u32>& stripped_indices,
         if (a == UINT32_MAX || b == UINT32_MAX || c == UINT32_MAX) {
           continue;
         }
-        unstripped.push_back(a);
-        unstripped.push_back(b);
-        unstripped.push_back(c);
+
+        auto& va = vertices[a];
+        auto& vb = vertices[b];
+        auto& vc = vertices[c];
+
+        math::Vector3f na(va.normal[0], va.normal[1], va.normal[2]);
+        math::Vector3f nb(vb.normal[0], vb.normal[1], vb.normal[2]);
+        math::Vector3f nc(vc.normal[0], vc.normal[1], vc.normal[2]);
+
+        math::Vector3f avg_normal = (na + nb + nc).normalized();
+
+        math::Vector3f pa(va.pos[0], va.pos[1], va.pos[2]);
+        math::Vector3f pb(vb.pos[0], vb.pos[1], vb.pos[2]);
+        math::Vector3f pc(vc.pos[0], vc.pos[1], vc.pos[2]);
+
+        math::Vector3f edge1 = pb - pa;
+        math::Vector3f edge2 = pc - pa;
+        math::Vector3f face_normal = edge1.cross(edge2).normalized();
+
+        if (face_normal.dot(avg_normal) < 0.0f) {
+          unstripped.push_back(a);
+          unstripped.push_back(c);
+          unstripped.push_back(b);
+        } else {
+          unstripped.push_back(a);
+          unstripped.push_back(b);
+          unstripped.push_back(c);
+        }
       }
       effect_dtc.push_back(unstripped.size() - effect_dts.back());
     }
@@ -541,6 +567,41 @@ int make_normal_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& vert
   return accessor_idx;
 }
 
+int make_normal_buffer_accessor(const std::vector<tfrag3::MercVertex>& vertices, tinygltf::Model& model) {
+  // first create a buffer:
+  int buffer_idx = (int)model.buffers.size();
+  auto& buffer = model.buffers.emplace_back();
+  buffer.data.resize(sizeof(float) * 3 * vertices.size());
+  std::vector<float> floats;
+
+  // and fill it
+  for (size_t i = 0; i < vertices.size(); i++) {
+    for (int j = 0; j < 3; j++) {
+      floats.push_back(vertices[i].normal[j]);
+    }
+  }
+  memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
+
+  // create a view of this buffer
+  int buffer_view_idx = (int)model.bufferViews.size();
+  auto& buffer_view = model.bufferViews.emplace_back();
+  buffer_view.buffer = buffer_idx;
+  buffer_view.byteOffset = 0;
+  buffer_view.byteLength = buffer.data.size();
+  buffer_view.byteStride = 0;  // tightly packed
+  buffer_view.target = TINYGLTF_TARGET_ARRAY_BUFFER;
+
+  int accessor_idx = (int)model.accessors.size();
+  auto& accessor = model.accessors.emplace_back();
+  accessor.bufferView = buffer_view_idx;
+  accessor.byteOffset = 0;
+  accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+  accessor.count = vertices.size();
+  accessor.type = TINYGLTF_TYPE_VEC3;
+
+  return accessor_idx;
+}
+
 /*!
  * Create a tinygltf buffer and buffer view for indices, and convert to gltf format.
  * The map can be used to go from slots in the old index buffer to new.
@@ -751,11 +812,12 @@ int make_shrub_index_buffer_view_grouped(const std::vector<u32>& indices,
 
 int make_merc_index_buffer_view(const std::vector<u32>& indices,
                                 const tfrag3::MercModel& mmodel,
+                                const std::vector<tfrag3::MercVertex>& vertices,
                                 tinygltf::Model& model,
                                 std::vector<std::vector<u32>>& draw_to_start,
                                 std::vector<std::vector<u32>>& draw_to_count) {
   std::vector<u32> unstripped;
-  unstrip_merc_draws(indices, mmodel, unstripped, draw_to_start, draw_to_count);
+  unstrip_merc_draws(indices, mmodel, vertices, unstripped, draw_to_start, draw_to_count);
 
   // first create a buffer:
   int buffer_idx = (int)model.buffers.size();
@@ -1216,9 +1278,11 @@ void add_merc(const tfrag3::Level& level,
   int texture_buffer_accessor = make_tex_buffer_accessor(mverts, model, 1.f);
 
   std::vector<std::vector<u32>> draw_to_start, draw_to_count;
-  int index_buffer_view = make_merc_index_buffer_view(level.merc_data.indices, mmodel, model,
+  int index_buffer_view = make_merc_index_buffer_view(level.merc_data.indices, mmodel, mverts, model,
                                                       draw_to_start, draw_to_count);
   int colors = make_color_buffer_accessor(mverts, model);
+
+  int normal_buffer_accessor = make_normal_buffer_accessor(mverts, model);
 
   auto joints_accessor = make_bones_accessor(mverts, model);
   auto weights_accessor = make_weights_accessor(mverts, model);
@@ -1294,12 +1358,14 @@ void add_merc(const tfrag3::Level& level,
       prim.attributes["POSITION"] = position_buffer_accessor;
       prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
       prim.attributes["COLOR_0"] = colors;
+      prim.attributes["NORMAL"] = normal_buffer_accessor;
       prim.attributes["JOINTS_0"] = joints_accessor;
       prim.attributes["WEIGHTS_0"] = weights_accessor;
       prim.mode = TINYGLTF_MODE_TRIANGLES;
     }
   }
 }
+
 }  // namespace
 
 /*!
