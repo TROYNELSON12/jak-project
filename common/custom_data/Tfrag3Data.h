@@ -378,6 +378,18 @@ enum class TieCategory {
 };
 constexpr int kNumTieCategories = 9;
 
+static const char* kTieCategoryNames[tfrag3::kNumTieCategories] = {
+      "normal",
+      "trans",
+      "water",
+      "normal-envmap",
+      "trans-envmap",
+      "water-envmap",
+      "normal-envmap-second-draw",
+      "trans-envmap-second-draw",
+      "water-envmap-second-draw",
+  };
+
 constexpr bool is_envmap_first_draw_category(tfrag3::TieCategory category) {
   switch (category) {
     case tfrag3::TieCategory::NORMAL_ENVMAP:

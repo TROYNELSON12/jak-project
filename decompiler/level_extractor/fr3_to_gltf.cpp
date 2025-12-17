@@ -783,7 +783,8 @@ const int kMaxColor = 8;
 void add_tfrag(const tfrag3::Level& level,
                const tfrag3::TfragTree& tfrag_in,
                tinygltf::Model& model,
-               std::unordered_map<int, int>& tex_image_map) {
+               std::unordered_map<int, int>& tex_image_map,
+               u32 index) {
   // copy and unpack in place
   tfrag3::TfragTree tfrag = tfrag_in;
   tfrag.unpack();
@@ -796,6 +797,7 @@ void add_tfrag(const tfrag3::Level& level,
   int mesh_idx = (int)model.meshes.size();
   auto& mesh = model.meshes.emplace_back();
   node.mesh = mesh_idx;
+  node.name = fmt::format("Tfrag_{}_{}", tfrag3::tfrag_tree_names[(int)tfrag_in.kind], index);
 
   int position_buffer_accessor = make_position_buffer_accessor(tfrag.unpacked.vertices, model);
   int texture_buffer_accessor = make_tex_buffer_accessor(tfrag.unpacked.vertices, model, 1.f);
@@ -824,7 +826,8 @@ void add_tfrag(const tfrag3::Level& level,
 void add_tie(const tfrag3::Level& level,
              const tfrag3::TieTree& tie_in,
              tinygltf::Model& model,
-             std::unordered_map<int, int>& tex_image_map) {
+             std::unordered_map<int, int>& tex_image_map,
+             u32 index) {
   // copy and unpack in place
   tfrag3::TieTree tie = tie_in;
   tie.unpack();
@@ -834,9 +837,11 @@ void add_tie(const tfrag3::Level& level,
   auto& node = model.nodes.emplace_back();
   model.scenes.at(0).nodes.push_back(node_idx);
 
-  int mesh_idx = (int)model.meshes.size();
-  auto& mesh = model.meshes.emplace_back();
-  node.mesh = mesh_idx;
+  // Do not create a top-level mesh here; child meshes for each category will be created
+  // (this avoids leaving an empty mesh referenced by the root node, which can invalidate
+  // the GLTF for some importers).
+  node.name = fmt::format("TIE_Root_{}", index);
+  //node.name = fmt::format("TIE_{}_{}", tfrag3::tfrag_tree_names[(int)tie_in.kind], index);
 
   int position_buffer_accessor = make_position_buffer_accessor(tie.unpacked.vertices, model);
   int normal_buffer_accessor = make_normal_buffer_accessor(tie.unpacked.vertices, model);
@@ -848,17 +853,40 @@ void add_tie(const tfrag3::Level& level,
   for (int i = 0; i < kMaxColor; i++) {
     colors[i] = make_color_buffer_accessor(tie.unpacked.vertices, model, tie, i);
   }
+  int env_color_buffer_accessor = make_env_color_buffer_accessor(tie.unpacked.vertices, model);
 
-  for (auto& draw : tie.static_draws) {
-    auto& prim = mesh.primitives.emplace_back();
-    prim.material = add_material_for_tex(level, model, draw.tree_tex_id, tex_image_map, draw.mode);
-    prim.indices = make_index_buffer_accessor(model, draw, index_map, index_buffer_view);
-    prim.attributes["POSITION"] = position_buffer_accessor;
-    prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
-    for (int i = 0; i < kMaxColor; i++) {
-      prim.attributes[fmt::format("COLOR_{}", i)] = colors[i];
+  for (int cat = 0; cat < tfrag3::kNumTieCategories; cat++) {
+    u32 start = tie.category_draw_indices[cat];
+    u32 end = tie.category_draw_indices[cat + 1];
+    if (start >= end) {
+      continue;
     }
-    prim.mode = TINYGLTF_MODE_TRIANGLES;
+
+    // create a child node+mesh for this category so it can be named
+    int c_node_idx = (int)model.nodes.size();
+    auto& c_node = model.nodes.emplace_back();
+    model.nodes[node_idx].children.push_back(c_node_idx);
+    int c_mesh_idx = (int)model.meshes.size();
+    auto& c_mesh = model.meshes.emplace_back();
+    c_node.mesh = c_mesh_idx;
+    c_node.name = fmt::format("TIE_{}_{}", tfrag3::kTieCategoryNames[cat], index);
+
+    // add all draws in this category as primitives on the child mesh
+    for (u32 draw_idx = start; draw_idx < end; draw_idx++) {
+      const auto& draw = tie.static_draws.at(draw_idx);
+      auto& prim = c_mesh.primitives.emplace_back();
+
+      prim.material = add_material_for_tex(level, model, draw.tree_tex_id, tex_image_map, draw.mode);
+      prim.indices = make_index_buffer_accessor(model, draw, index_map, index_buffer_view);
+      prim.attributes["POSITION"] = position_buffer_accessor;
+      prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
+      for (int i = 0; i < kMaxColor; i++) {
+        prim.attributes[fmt::format("COLOR_{}", i)] = colors[i];
+      }
+      prim.attributes[fmt::format("COLOR_{}", kMaxColor + 0)] = env_color_buffer_accessor;
+      prim.attributes["NORMAL"] = normal_buffer_accessor;
+      prim.mode = TINYGLTF_MODE_TRIANGLES;
+    }
   }
 
   if (!tie.instanced_wind_draws.empty()) {
@@ -878,6 +906,7 @@ void add_tie(const tfrag3::Level& level,
         int c_mesh_idx = (int)model.meshes.size();
         auto& c_mesh = model.meshes.emplace_back();
         c_node.mesh = c_mesh_idx;
+        c_node.name = fmt::format("TIE_WindMesh_{}_{}_{}", index, draw_idx, grp_idx);
         auto& prim = c_mesh.primitives.emplace_back();
 
         const auto& info = tie.wind_instance_info.at(grp.instance_idx);
@@ -1172,16 +1201,19 @@ void save_level_background_as_gltf(const tfrag3::Level& level, const fs::path& g
   std::unordered_map<int, int> tex_image_map;
 
   // add all hi-lod tfrag trees
-  for (const auto& tfrag : level.tfrag_trees.at(0)) {
-    add_tfrag(level, tfrag, model, tex_image_map);
+  for (u32 i = 0; i < level.tfrag_trees.at(0).size(); i++) {
+    const auto& tfrag = level.tfrag_trees.at(0).at(i);
+    add_tfrag(level, tfrag, model, tex_image_map, i);
   }
 
-  for (const auto& tie : level.tie_trees.at(0)) {
-    add_tie(level, tie, model, tex_image_map);
+  for (u32 i = 0; i < level.tie_trees.at(0).size(); i++) {
+    const auto& tie = level.tie_trees.at(0).at(i);
+    add_tie(level, tie, model, tex_image_map, i);
   }
 
-  for (const auto& shrub : level.shrub_trees) {
-    add_shrub(level, shrub, model, tex_image_map);
+  for (u32 i = 0; i < level.shrub_trees.size(); i++) {
+    const auto& shrub = level.shrub_trees.at(i);
+    add_shrub(level, shrub, model, tex_image_map, i);
   }
 
   model.asset.generator = "opengoal";
