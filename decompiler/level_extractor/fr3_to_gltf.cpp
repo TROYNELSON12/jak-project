@@ -253,10 +253,9 @@ int make_color_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& verti
   std::vector<float> floats;
 
   for (size_t i = 0; i < vertices.size(); i++) {
-    for (int j = 0; j < 3; j++) {
+    for (int j = 0; j < 4; j++) {
       floats.push_back(((float)tfrag_tree.colors.read(vertices[i].color_index, time_of_day, j)) / 255.f);
     }
-    floats.push_back(((float)tfrag_tree.colors.read(vertices[i].color_index, time_of_day, 3)) / 255.f);
     //floats.push_back(1.f);
   }
   memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
@@ -298,11 +297,10 @@ int make_color_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& verti
   std::vector<float> floats;
 
   for (size_t i = 0; i < vertices.size(); i++) {
-    for (int j = 0; j < 3; j++) {
+    for (int j = 0; j < 4; j++) {
       floats.push_back(((float)tie_tree.colors.read(vertices[i].color_index, time_of_day, j)) / 255.f);
     }
-    //floats.push_back(((float)tie_tree.colors.read(vertices[i].color_index, time_of_day, 4)) / 128.f);
-    floats.push_back(1.f);
+    //floats.push_back(1.f);
   }
   memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
 
