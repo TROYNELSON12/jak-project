@@ -5,6 +5,8 @@
 #include "common/common_types.h"
 #include "common/math/Vector.h"
 
+#include "common/custom_data/Tfrag3Data.h"
+
 /*!
  * Fix-up tfrag/tie format mesh to a best-guess unstripped mesh with proper triangle orientation.
  * The input is the tie/tfrag index list, using UINT32_MAX as primitive restart.
@@ -19,7 +21,13 @@
  * The stripping logic of shrub/merc/generic models appears to be different, and this likely won't
  * work.
  */
-void fixup_and_unstrip_tfrag_tie(const std::vector<u32>& stripped_indices,
-                                 const std::vector<math::Vector3f>& positions,
-                                 std::vector<u32>& unstripped,
-                                 std::vector<u32>& old_to_new_start);
+void fixup_and_unstrip_tfrag(const std::vector<u32>& stripped_indices,
+                             const std::vector<math::Vector3f>& positions,
+                             std::vector<u32>& unstripped,
+                             std::vector<u32>& old_to_new_start);
+
+void fixup_and_unstrip_tie(const std::vector<u32>& stripped_indices,
+                           const std::vector<math::Vector3f>& positions,
+                           const std::vector<tfrag3::PreloadedVertex>& vertices,
+                           std::vector<u32>& unstripped,
+                           std::vector<u32>& old_to_new_start);

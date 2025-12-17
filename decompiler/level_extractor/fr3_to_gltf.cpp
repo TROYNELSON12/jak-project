@@ -10,6 +10,8 @@
 
 #include "third-party/tiny_gltf/tiny_gltf.h"
 
+#include "common/log/log.h"
+
 namespace {
 
 /*!
@@ -28,11 +30,19 @@ math::Matrix4f unscale_translation(const math::Matrix4f& in) {
  * Assumes that this is the tfrag/tie format of stripping. Will flip tris as needed so the faces
  * in this fragment all point a consistent way. However, the entire frag may be flipped.
  */
-void unstrip_tfrag_tie(const std::vector<u32>& stripped_indices,
+void unstrip_tfrag(const std::vector<u32>& stripped_indices,
                        const std::vector<math::Vector3f>& positions,
                        std::vector<u32>& unstripped,
                        std::vector<u32>& old_to_new_start) {
-  fixup_and_unstrip_tfrag_tie(stripped_indices, positions, unstripped, old_to_new_start);
+  fixup_and_unstrip_tfrag(stripped_indices, positions, unstripped, old_to_new_start);
+}
+
+void unstrip_tie(const std::vector<u32>& stripped_indices,
+                 const std::vector<math::Vector3f>& positions,
+                 const std::vector<tfrag3::PreloadedVertex>& vertices,
+                 std::vector<u32>& unstripped,
+                 std::vector<u32>& old_to_new_start) {
+  fixup_and_unstrip_tie(stripped_indices, positions, vertices, unstripped, old_to_new_start);
 }
 
 /*!
@@ -484,6 +494,19 @@ int make_shrub_color_buffer_accessor(const std::vector<tfrag3::ShrubGpuVertex>& 
   return accessor_idx;
 }
 
+float unpack_s10(u32 num) {
+  // chop to ten bits.
+  s32 snum = static_cast<s32>(num & 0x3FF);
+
+  // flip if negative bit (10)
+  if (snum & 0x200) {
+    snum |= ~0x3FF;
+  }
+
+  float result = static_cast<float>(snum);
+  return result / 511.0f;
+}
+
 int make_normal_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& vertices,
                                 tinygltf::Model& model) {
   // first create a buffer:
@@ -524,12 +547,39 @@ int make_normal_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& vert
  * Create a tinygltf buffer and buffer view for indices, and convert to gltf format.
  * The map can be used to go from slots in the old index buffer to new.
  */
-int make_tfrag_tie_index_buffer_view(const std::vector<u32>& indices,
-                                     const std::vector<math::Vector3f>& positions,
-                                     tinygltf::Model& model,
-                                     std::vector<u32>& map_out) {
+int make_tfrag_index_buffer_view(const std::vector<u32>& indices,
+                                 const std::vector<math::Vector3f>& positions,
+                                 tinygltf::Model& model,
+                                 std::vector<u32>& map_out) {
   std::vector<u32> unstripped;
-  unstrip_tfrag_tie(indices, positions, unstripped, map_out);
+  unstrip_tfrag(indices, positions, unstripped, map_out);
+
+  // first create a buffer:
+  int buffer_idx = (int)model.buffers.size();
+  auto& buffer = model.buffers.emplace_back();
+  buffer.data.resize(sizeof(u32) * unstripped.size());
+
+  // and fill it
+  memcpy(buffer.data.data(), unstripped.data(), buffer.data.size());
+
+  // create a view of this buffer
+  int buffer_view_idx = (int)model.bufferViews.size();
+  auto& buffer_view = model.bufferViews.emplace_back();
+  buffer_view.buffer = buffer_idx;
+  buffer_view.byteOffset = 0;
+  buffer_view.byteLength = buffer.data.size();
+  buffer_view.byteStride = 0;  // tightly packed
+  buffer_view.target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
+  return buffer_view_idx;
+}
+
+int make_tie_index_buffer_view(const std::vector<u32>& indices,
+                               const std::vector<math::Vector3f>& positions,
+                               const std::vector<tfrag3::PreloadedVertex>& vertices,
+                               tinygltf::Model& model,
+                               std::vector<u32>& map_out) {
+  std::vector<u32> unstripped;
+  unstrip_tie(indices, positions, vertices, unstripped, map_out);
 
   // first create a buffer:
   int buffer_idx = (int)model.buffers.size();
@@ -752,7 +802,7 @@ void add_tfrag(const tfrag3::Level& level,
   int position_buffer_accessor = make_position_buffer_accessor(tfrag.unpacked.vertices, model);
   int texture_buffer_accessor = make_tex_buffer_accessor(tfrag.unpacked.vertices, model, 1.f);
   std::vector<u32> index_map;
-  int index_buffer_view = make_tfrag_tie_index_buffer_view(
+  int index_buffer_view = make_tfrag_index_buffer_view(
       tfrag.unpacked.indices, extract_positions(tfrag.unpacked.vertices), model, index_map);
   int colors[kMaxColor];
 
@@ -791,10 +841,10 @@ void add_tie(const tfrag3::Level& level,
   node.mesh = mesh_idx;
 
   int position_buffer_accessor = make_position_buffer_accessor(tie.unpacked.vertices, model);
+  int normal_buffer_accessor = make_normal_buffer_accessor(tie.unpacked.vertices, model);
   int texture_buffer_accessor = make_tex_buffer_accessor(tie.unpacked.vertices, model, 1.f);
   std::vector<u32> index_map;
-  int index_buffer_view = make_tfrag_tie_index_buffer_view(
-      tie.unpacked.indices, extract_positions(tie.unpacked.vertices), model, index_map);
+  int index_buffer_view = make_tie_index_buffer_view( tie.unpacked.indices, extract_positions(tie.unpacked.vertices), tie.unpacked.vertices, model, index_map);
   int colors[kMaxColor];
 
   for (int i = 0; i < kMaxColor; i++) {

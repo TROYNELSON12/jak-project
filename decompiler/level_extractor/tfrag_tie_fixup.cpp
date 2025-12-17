@@ -1,4 +1,5 @@
 #include "tfrag_tie_fixup.h"
+#include "fr3_to_gltf.h"
 
 #include <algorithm>
 #include <set>
@@ -7,6 +8,8 @@
 #include "common/log/log.h"
 #include "common/math/Vector.h"
 #include "common/util/Assert.h"
+
+#include "common/custom_data/Tfrag3Data.h"
 
 // Approach:
 // 1: un-strip vertices and make individual strips consistent. Group triangles by strip.
@@ -51,9 +54,9 @@ void unstrip(const std::vector<u32>& stripped_indices,
 
   // loop over all groups of 3 indices...
   for (size_t i = 2; i < stripped_indices.size(); i++) {
-    u32 a = stripped_indices[i];
+    u32 c = stripped_indices[i];
     u32 b = stripped_indices[i - 1];
-    u32 c = stripped_indices[i - 2];
+    u32 a = stripped_indices[i - 2];
     old_to_new_start.push_back(num_unstripped_idx);
     if (a == UINT32_MAX || b == UINT32_MAX || c == UINT32_MAX) {
       toggle = false;
@@ -424,10 +427,10 @@ void make_final_indices(const std::vector<TriGroup>& groups, std::vector<u32>& i
   }
 }
 
-void fixup_and_unstrip_tfrag_tie(const std::vector<u32>& stripped_indices,
-                                 const std::vector<math::Vector3f>& positions,
-                                 std::vector<u32>& unstripped,
-                                 std::vector<u32>& old_to_new_start) {
+void fixup_and_unstrip_tfrag(const std::vector<u32>& stripped_indices,
+                             const std::vector<math::Vector3f>& positions,
+                             std::vector<u32>& unstripped,
+                             std::vector<u32>& old_to_new_start) {
   // Part 1
   std::vector<TriGroup> groups;
   unstrip(stripped_indices, groups, old_to_new_start);
@@ -451,6 +454,115 @@ void fixup_and_unstrip_tfrag_tie(const std::vector<u32>& stripped_indices,
 
   // Part 6
   apply_flips(flips, groups);
+
+  // Part 7
+  make_final_indices(groups, unstripped);
+}
+
+float unpack_s10(u32 num) {
+  // chop to ten bits.
+  s32 snum = static_cast<s32>(num & 0x3FF);
+  
+  // flip if negative bit (10)
+  if (snum & 0x200) {
+    snum |= ~0x3FF;
+  }
+
+  float result = static_cast<float>(snum);
+  return result / 511.0f;
+}
+
+void unstrip_tie(const std::vector<u32>& stripped_indices,
+                 const std::vector<tfrag3::PreloadedVertex>& vertices,
+                 std::vector<TriGroup>& groups,
+                 std::vector<u32>& old_to_new_start) {
+  // first triangle is the first triangle
+  old_to_new_start.push_back(0);
+  // doesn't matter, in the middle of a strip
+  old_to_new_start.push_back(0);
+
+    // the tfrag output flips every other triangle, we'll need to unflip that.
+  bool toggle = false;
+
+  // total number of indices created in the output.
+  size_t num_unstripped_idx = 0;
+
+  // the current strip
+  TriGroup building_group;
+
+  // loop over all groups of 3 indices...
+  for (size_t i = 2; i < stripped_indices.size(); i++) {
+    u32 c = stripped_indices[i];
+    u32 b = stripped_indices[i - 1];
+    u32 a = stripped_indices[i - 2];
+    old_to_new_start.push_back(num_unstripped_idx);
+
+    if (a == UINT32_MAX || b == UINT32_MAX || c == UINT32_MAX) {
+      toggle = false;
+      if (!building_group.tris.empty()) {
+        groups.push_back(building_group);
+        building_group.tris.clear();
+      }
+      continue;
+    }
+
+    auto& tri = building_group.tris.emplace_back();
+
+    num_unstripped_idx += 3;
+
+    auto& va = vertices[a];
+    auto& vb = vertices[b];
+    auto& vc = vertices[c];
+
+    if (va.nor == 0 && vb.nor == 0 && vc.nor == 0) {
+      if (toggle) {
+        tri.idx[0] = a;
+        tri.idx[1] = c;
+        tri.idx[2] = b;
+      } else {
+        tri.idx[0] = a;
+        tri.idx[1] = b;
+        tri.idx[2] = c;
+      }
+      toggle = !toggle;
+      continue;
+    }
+
+    math::Vector3f na(unpack_s10(va.nor), unpack_s10(va.nor >> 10), unpack_s10(va.nor >> 20));
+    math::Vector3f nb(unpack_s10(vb.nor), unpack_s10(vb.nor >> 10), unpack_s10(vb.nor >> 20));
+    math::Vector3f nc(unpack_s10(vc.nor), unpack_s10(vc.nor >> 10), unpack_s10(vc.nor >> 20));
+
+    math::Vector3f avg_normal = (na + nb + nc).normalized();
+
+    math::Vector3f pa(va.x, va.y, va.z);
+    math::Vector3f pb(vb.x, vb.y, vb.z);
+    math::Vector3f pc(vc.x, vc.y, vc.z);
+
+    math::Vector3f edge1 = pb - pa;
+    math::Vector3f edge2 = pc - pa;
+    math::Vector3f face_normal = edge1.cross(edge2).normalized();
+
+    if (face_normal.dot(avg_normal) < 0.0f) {
+      tri.idx[0] = a;
+      tri.idx[1] = c;
+      tri.idx[2] = b;
+    } else {
+      tri.idx[0] = a;
+      tri.idx[1] = b;
+      tri.idx[2] = c;
+    }
+  }
+  old_to_new_start.push_back(num_unstripped_idx);
+}
+
+void fixup_and_unstrip_tie(const std::vector<u32>& stripped_indices,
+                           const std::vector<math::Vector3f>& positions,
+                           const std::vector<tfrag3::PreloadedVertex>& vertices,
+                           std::vector<u32>& unstripped,
+                           std::vector<u32>& old_to_new_start) {
+  // Part 1
+  std::vector<TriGroup> groups;
+  unstrip_tie(stripped_indices, vertices, groups, old_to_new_start);
 
   // Part 7
   make_final_indices(groups, unstripped);
