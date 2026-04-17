@@ -246,7 +246,7 @@ int run_decompilation_process(decompiler::Config config,
       auto texture_file_name = out_folder / "dump" / "tex-info.min.json";
       nlohmann::json texture_json = db.dts.textures;
       file_util::create_dir_if_needed_for_file(texture_file_name);
-      file_util::write_text_file(texture_file_name, texture_json.dump(-1));
+      file_util::write_text_file(texture_file_name, texture_json.dump(2));
       lg::info("[DUMP] Dumped texture info to {}", texture_file_name.string());
     }
   }

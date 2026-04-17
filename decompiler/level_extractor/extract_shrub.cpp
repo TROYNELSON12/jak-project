@@ -37,6 +37,30 @@ struct ShrubVertex {
   math::Vector<float, 2> st;
   math::Vector<u8, 3> rgba_generic;
   bool adc = false;
+
+  bool operator==(const ShrubVertex& other) const {
+    return xyz.x() == other.xyz.x() &&
+           xyz.y() == other.xyz.y() &&
+           xyz.z() == other.xyz.z() &&
+           st.x() == other.st.x() &&
+           st.y() == other.st.y() &&
+           rgba_generic.x() == other.rgba_generic.x() &&
+           rgba_generic.y() == other.rgba_generic.y() &&
+           rgba_generic.z() == other.rgba_generic.z();
+  }
+
+  struct hash {
+    std::size_t operator()(const ShrubVertex& x) const {
+      return std::hash<float>()(x.xyz.x()) ^
+             std::hash<float>()(x.xyz.y()) ^
+             std::hash<float>()(x.xyz.z()) ^
+             std::hash<float>()(x.st.x()) ^
+             std::hash<float>()(x.st.y()) ^
+             std::hash<u8>()(x.rgba_generic.x()) ^
+             std::hash<u8>()(x.rgba_generic.y()) ^
+             std::hash<u8>()(x.rgba_generic.z());
+    }
+  };
 };
 struct DrawSettings {
   DrawMode mode;
@@ -58,20 +82,100 @@ struct ShrubInstanceInfo {
   u32 color_idx;
   std::array<math::Vector4f, 4> mat;
   math::Vector4f bsphere;
+  u16 wind_index;
 };
 
 struct ShrubProtoInfo {
+  std::string name;
+  u32 flags;
   std::vector<ShrubFrag> frags;
   std::vector<ShrubInstanceInfo> instances;
+  float stiffness;
 };
 
-std::string debug_dump_proto_to_obj(const ShrubProtoInfo& proto) {
-  std::vector<math::Vector<float, 3>> verts;
-  std::vector<math::Vector<float, 2>> tcs;
-  std::vector<math::Vector<int, 3>> faces;
+int get_or_add_vertex(const ShrubVertex& v,
+                      std::vector<ShrubVertex>& unique_verts,
+                      std::unordered_map<ShrubVertex, int, ShrubVertex::hash>& lookup) {
+  auto it = lookup.find(v);
+  if (it != lookup.end())
+    return it->second;
+
+  int idx = unique_verts.size();
+  unique_verts.push_back(v);
+  lookup[v] = idx;
+  return idx;
+}
+
+std::string debug_dump_proto_to_obj(const ShrubProtoInfo& proto,
+                                    const TextureDB& tdb,
+                                    tfrag3::Level& lev) {
+  //std::vector<math::Vector<float, 3>> verts;
+  //std::vector<math::Vector<float, 2>> tcs;
+  //std::vector<math::Vector<u8, 3>> cols;
+
+  std::vector<ShrubVertex> unique_verts;
+  std::unordered_map<ShrubVertex, int, ShrubVertex::hash> lookup;
+
+  struct MatKey {
+    u32 tex;
+    u32 mode;
+
+    bool operator==(const MatKey& o) const { return tex == o.tex && mode == o.mode; }
+  };
+
+  struct MatKeyHash {
+    size_t operator()(const MatKey& k) const { return (size_t(k.tex) << 32) ^ size_t(k.mode); }
+  };
+
+  std::unordered_map<MatKey, std::vector<math::Vector<int, 3>>, MatKeyHash> grouped_faces;
 
   for (auto& frag : proto.frags) {
     for (auto& strip : frag.draws) {
+      // what texture are we using?
+      u32 combo_tex = strip.settings.combo_tex;
+
+      // try looking it up in the existing textures that we have in the C++ renderer data.
+      // (this is shared with tfrag)
+      u32 idx_in_lev_data = UINT32_MAX;
+      for (u32 i = 0; i < lev.textures.size(); i++) {
+        if (lev.textures[i].combo_id == combo_tex) {
+          idx_in_lev_data = i;
+          break;
+        }
+      }
+
+      if (idx_in_lev_data == UINT32_MAX) {
+        // didn't find it, have to add a new one texture.
+        auto tex_it = tdb.textures.find(combo_tex);
+        if (tex_it == tdb.textures.end()) {
+          bool ok_to_miss = false;  // for TIE, there's no missing textures.
+          if (ok_to_miss) {
+            // we're missing a texture, just use the first one.
+            tex_it = tdb.textures.begin();
+          } else {
+            ASSERT_MSG(
+                false,
+                fmt::format(
+                    "texture {} wasn't found. make sure it is loaded somehow. You may need to "
+                    "include ART.DGO or GAME.DGO in addition to the level DGOs for shared "
+                    "textures. tpage is {} id is {} (0x{:x})",
+                    combo_tex, combo_tex >> 16, combo_tex & 0xffff, combo_tex & 0xffff));
+          }
+        }
+        // add a new texture to the level data
+        idx_in_lev_data = lev.textures.size();
+        lev.textures.emplace_back();
+        auto& new_tex = lev.textures.back();
+        new_tex.combo_id = combo_tex;
+        new_tex.w = tex_it->second.w;
+        new_tex.h = tex_it->second.h;
+        new_tex.debug_name = tex_it->second.name;
+        new_tex.debug_tpage_name = tdb.tpage_names.at(tex_it->second.page);
+        new_tex.data = tex_it->second.rgba_bytes;
+      }
+
+      MatKey key{idx_in_lev_data, strip.settings.mode.as_int()};
+
       // add verts...
       ASSERT(strip.vertices.size() >= 3);
 
@@ -82,11 +186,15 @@ std::string debug_dump_proto_to_obj(const ShrubProtoInfo& proto) {
       int q_idx = 0;
       int startup = 0;
       while (vert_idx < (int)strip.vertices.size()) {
-        verts.push_back(strip.vertices.at(vert_idx).xyz / 65536);  // no idea
-        tcs.push_back(math::Vector<float, 2>{strip.vertices.at(vert_idx).st.x(),
-                                             strip.vertices.at(vert_idx).st.y()});
+        ShrubVertex v;
+        v.xyz = strip.vertices.at(vert_idx).xyz / 4096;
+        v.st = strip.vertices.at(vert_idx).st / 4096;
+        v.rgba_generic = strip.vertices.at(vert_idx).rgba_generic;
 
-        vtx_idx_queue[q_idx++] = verts.size();
+        int idx = get_or_add_vertex(v, unique_verts, lookup);
+
+        idx++;
+        vtx_idx_queue[q_idx++] = idx;
 
         // wrap the index
         if (q_idx == 3) {
@@ -99,7 +207,7 @@ std::string debug_dump_proto_to_obj(const ShrubProtoInfo& proto) {
         }
 
         if (startup >= 3 && strip.vertices.at(vert_idx).adc) {
-          faces.push_back(
+          grouped_faces[key].push_back(
               math::Vector<int, 3>{vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
         }
         vert_idx++;
@@ -108,15 +216,22 @@ std::string debug_dump_proto_to_obj(const ShrubProtoInfo& proto) {
   }
 
   std::string result;
-  for (auto& vert : verts) {
-    result += fmt::format("v {} {} {}\n", vert.x(), vert.y(), vert.z());
+  for (auto& v : unique_verts) {
+    result += fmt::format("v {} {} {}\n", v.xyz.x(), v.xyz.y(), v.xyz.z());
   }
-  for (auto& tc : tcs) {
-    result += fmt::format("vt {} {}\n", tc.x(), tc.y());
+  for (auto& v : unique_verts) {
+    auto& col = v.rgba_generic;
+    result += fmt::format("vc {} {} {} {}\n", col.x(), col.y(), col.z(), 0);
   }
-  for (auto& face : faces) {
-    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x(), face.x(), face.y(), face.y(), face.z(),
-                          face.z());
+  for (auto& v : unique_verts) {
+    result += fmt::format("vt {} {}\n", v.st.x(), v.st.y());
+  }
+  for (auto& [key, face_list] : grouped_faces) {
+    result += fmt::format("d texture:{} drawmode:{}\n", key.tex, key.mode);
+
+    for (auto& f : face_list) {
+      result += fmt::format("f {} {} {}\n", f.x(), f.y(), f.z());
+    }
   }
 
   return result;
@@ -257,8 +372,13 @@ DrawSettings adgif_to_draw_mode(const AdGifData& ad,
 ShrubProtoInfo extract_proto(const shrub_types::PrototypeBucketShrub& proto,
                              const TextureDB& tdb,
                              const std::vector<level_tools::TextureRemap>& map,
+                             const fs::path& output_dir,
+                             tfrag3::Level& lev,
                              GameVersion version) {
   ShrubProtoInfo result;
+  result.name = proto.name;
+  result.stiffness = proto.stiffness;
+  result.flags = proto.flags;
   for (int frag_idx = 0; frag_idx < proto.generic_geom.length; frag_idx++) {
     auto& frag_out = result.frags.emplace_back();
     auto& frag = proto.generic_geom.shrubs.at(frag_idx);
@@ -313,11 +433,14 @@ ShrubProtoInfo extract_proto(const shrub_types::PrototypeBucketShrub& proto,
     ASSERT(frag.vtx_cnt * 3 * sizeof(u16) <= frag.vtx.size());
   }
 
-  /*
+  if (proto.stiffness == 0)
+    return result;
+
+  auto file_path = output_dir / fmt::format("{}.obj", proto.name);
   file_util::write_text_file(
-      file_util::get_file_path({fmt::format("debug_out/shrub/{}.obj", proto.name)}),
-      debug_dump_proto_to_obj(result));
-      */
+      file_path,
+      debug_dump_proto_to_obj(result, tdb, lev));
+      
   return result;
 }
 
@@ -334,7 +457,7 @@ void extract_instance(const shrub_types::InstanceShrubbery& inst,
   result.mat[3][0] += result.bsphere[0];
   result.mat[3][1] += result.bsphere[1];
   result.mat[3][2] += result.bsphere[2];
-  // result.wind_index = instance.wind_index;
+  result.wind_index = inst.wind_index;
 
   result.mat[0][3] = 0.f;
   result.color_idx = inst.color_indices / 4;
@@ -355,19 +478,131 @@ math::Vector<float, 3> transform_shrub(const std::array<math::Vector4f, 4> mat,
   return result;
 }
 
+struct ShrubAllVertex {
+  math::Vector<float, 3> xyz;
+  math::Vector<float, 2> st;
+  math::Vector<u8, 3> rgba_generic;
+  u32 tod_index;
+  bool adc = false;
+
+  bool operator==(const ShrubAllVertex& other) const {
+    return xyz.x() == other.xyz.x() &&
+           xyz.y() == other.xyz.y() &&
+           xyz.z() == other.xyz.z() &&
+           st.x() == other.st.x() &&
+           st.y() == other.st.y() &&
+           rgba_generic.x() == other.rgba_generic.x() &&
+           rgba_generic.y() == other.rgba_generic.y() &&
+           rgba_generic.z() == other.rgba_generic.z() &&
+           tod_index == other.tod_index;
+  }
+
+  struct hash {
+    std::size_t operator()(const ShrubAllVertex& x) const {
+      return std::hash<float>()(x.xyz.x()) ^
+             std::hash<float>()(x.xyz.y()) ^
+             std::hash<float>()(x.xyz.z()) ^
+             std::hash<float>()(x.st.x()) ^
+             std::hash<float>()(x.st.y()) ^
+             std::hash<u8>()(x.rgba_generic.x()) ^
+             std::hash<u8>()(x.rgba_generic.y()) ^
+             std::hash<u8>()(x.rgba_generic.z()) ^
+             std::hash<u32>()(x.tod_index);
+    }
+  };
+};
+
+int get_or_add_vertex(const ShrubAllVertex& v,
+                      std::vector<ShrubAllVertex>& unique_verts,
+                      std::unordered_map<ShrubAllVertex, int, ShrubAllVertex::hash>& lookup) {
+  auto it = lookup.find(v);
+  if (it != lookup.end())
+    return it->second;
+
+  int idx = unique_verts.size();
+  unique_verts.push_back(v);
+  lookup[v] = idx;
+  return idx;
+}
+
 /*!
  * Dump the entire tie tree to an obj. Used to debug the transform_tie function. If we get this
  * right, it should fit in with .obj's produced from the tfrag debug.
  */
-std::string dump_full_to_obj(const std::vector<ShrubProtoInfo>& protos) {
-  std::vector<math::Vector<float, 3>> verts;
-  std::vector<math::Vector<int, 3>> faces;
+std::string dump_full_to_obj(const std::vector<ShrubProtoInfo>& protos,
+                             const TextureDB& tdb,
+                             tfrag3::Level& lev) {
+  //std::vector<math::Vector<float, 3>> verts;
+  //std::vector<math::Vector<int, 3>> faces;
+
+  std::vector<ShrubAllVertex> unique_verts;
+  std::unordered_map<ShrubAllVertex, int, ShrubAllVertex::hash> lookup;
+
+  struct MatKey {
+    u32 tex;
+    u32 mode;
+
+    bool operator==(const MatKey& o) const { return tex == o.tex && mode == o.mode; }
+  };
+
+  struct MatKeyHash {
+    size_t operator()(const MatKey& k) const { return (size_t(k.tex) << 32) ^ size_t(k.mode); }
+  };
+
+  std::unordered_map<MatKey, std::vector<math::Vector<int, 3>>, MatKeyHash> grouped_faces;
 
   for (auto& proto : protos) {
+    if (proto.stiffness != 0)
+      continue;
     for (auto& inst : proto.instances) {
       auto& mat = inst.mat;
       for (auto& frag : proto.frags) {
         for (auto& strip : frag.draws) {
+          // what texture are we using?
+          u32 combo_tex = strip.settings.combo_tex;
+
+          // try looking it up in the existing textures that we have in the C++ renderer data.
+          // (this is shared with tfrag)
+          u32 idx_in_lev_data = UINT32_MAX;
+          for (u32 i = 0; i < lev.textures.size(); i++) {
+            if (lev.textures[i].combo_id == combo_tex) {
+              idx_in_lev_data = i;
+              break;
+            }
+          }
+
+          if (idx_in_lev_data == UINT32_MAX) {
+            // didn't find it, have to add a new one texture.
+            auto tex_it = tdb.textures.find(combo_tex);
+            if (tex_it == tdb.textures.end()) {
+              bool ok_to_miss = false;  // for TIE, there's no missing textures.
+              if (ok_to_miss) {
+                // we're missing a texture, just use the first one.
+                tex_it = tdb.textures.begin();
+              } else {
+                ASSERT_MSG(
+                    false,
+                    fmt::format(
+                        "texture {} wasn't found. make sure it is loaded somehow. You may need to "
+                        "include ART.DGO or GAME.DGO in addition to the level DGOs for shared "
+                        "textures. tpage is {} id is {} (0x{:x})",
+                        combo_tex, combo_tex >> 16, combo_tex & 0xffff, combo_tex & 0xffff));
+              }
+            }
+            // add a new texture to the level data
+            idx_in_lev_data = lev.textures.size();
+            lev.textures.emplace_back();
+            auto& new_tex = lev.textures.back();
+            new_tex.combo_id = combo_tex;
+            new_tex.w = tex_it->second.w;
+            new_tex.h = tex_it->second.h;
+            new_tex.debug_name = tex_it->second.name;
+            new_tex.debug_tpage_name = tdb.tpage_names.at(tex_it->second.page);
+            new_tex.data = tex_it->second.rgba_bytes;
+          }
+
+          MatKey key{idx_in_lev_data, strip.settings.mode.as_int()};
+
           // add verts...
           ASSERT(strip.vertices.size() >= 3);
 
@@ -378,10 +613,16 @@ std::string dump_full_to_obj(const std::vector<ShrubProtoInfo>& protos) {
           int q_idx = 0;
           int startup = 0;
           while (vert_idx < (int)strip.vertices.size()) {
-            verts.push_back(transform_shrub(mat, strip.vertices.at(vert_idx).xyz) /
-                            65536);  // no idea
+            ShrubAllVertex v;
+            v.xyz = transform_shrub(mat, strip.vertices.at(vert_idx).xyz) / 4096;
+            v.st = strip.vertices.at(vert_idx).st / 4096;
+            v.rgba_generic = strip.vertices.at(vert_idx).rgba_generic;
+            v.tod_index = inst.color_idx;
 
-            vtx_idx_queue[q_idx++] = verts.size();
+            int idx = get_or_add_vertex(v, unique_verts, lookup);
+
+            idx++;
+            vtx_idx_queue[q_idx++] = idx;
 
             // wrap the index
             if (q_idx == 3) {
@@ -394,7 +635,7 @@ std::string dump_full_to_obj(const std::vector<ShrubProtoInfo>& protos) {
             }
 
             if (startup >= 3 && strip.vertices.at(vert_idx).adc) {
-              faces.push_back(
+              grouped_faces[key].push_back(
                   math::Vector<int, 3>{vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
             }
             vert_idx++;
@@ -405,13 +646,25 @@ std::string dump_full_to_obj(const std::vector<ShrubProtoInfo>& protos) {
   }
 
   std::string result;
-  for (auto& vert : verts) {
-    result += fmt::format("v {} {} {}\n", vert.x(), vert.y(), vert.z());
+  for (auto& v : unique_verts) {
+    result += fmt::format("v {} {} {}\n", v.xyz.x(), v.xyz.y(), v.xyz.z());
   }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vt {} {}\n", v.st.x(), v.st.y());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vp {}\n", v.tod_index);
+  }
+  for (auto& v : unique_verts) {
+    auto& col = v.rgba_generic;
+    result += fmt::format("vc {} {} {} {}\n", col.x(), col.y(), col.z(), 0);
+  }
+  for (auto& [key, face_list] : grouped_faces) {
+    result += fmt::format("d texture:{} drawmode:{}\n", key.tex, key.mode);
 
-  for (auto& face : faces) {
-    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x(), face.x(), face.y(), face.y(), face.z(),
-                          face.z());
+    for (auto& f : face_list) {
+      result += fmt::format("f {} {} {}\n", f.x(), f.y(), f.z());
+    }
   }
 
   return result;
@@ -537,6 +790,8 @@ void make_draws(tfrag3::Level& lev,
           grp.color_index = inst.color_idx;
           grp.start_vert = packed_vert_indices.at(frag_idx).at(draw_idx).first;
           grp.end_vert = packed_vert_indices.at(frag_idx).at(draw_idx).second;
+          grp.wind_idx = inst.wind_index;
+          grp.stiffness = proto.stiffness;
           tree_out.packed_vertices.instance_groups.push_back(grp);
 
           for (size_t vidx = 0; vidx < draw.vertices.size(); vidx++) {
@@ -568,14 +823,36 @@ void make_draws(tfrag3::Level& lev,
   tree_out.packed_vertices.total_vertex_count = global_vert_counter;
 }
 
-void extract_shrub(const shrub_types::DrawableTreeInstanceShrub* tree,
-                   const std::string& debug_name,
-                   const std::vector<level_tools::TextureRemap>& map,
-                   const TextureDB& tex_db,
-                   const std::vector<std::pair<int, int>>& /*expected_missing_textures*/,
-                   tfrag3::Level& out,
-                   bool dump_level,
-                   GameVersion version) {
+nlohmann::json vectorm_shrub_json(const math::Vector4f v) {
+  nlohmann::json result;
+  for (int i = 0; i < 4; i++) {
+    result.push_back(v[i] / 4096.f);
+  }
+  return result;
+}
+
+auto to_shrub_json_matrix = [](const std::array<math::Vector4f, 4>& mat) {
+  nlohmann::json j = nlohmann::json::array();
+  for (int i = 0; i < 4; i++) {
+    if (i != 3)
+      j.push_back({mat[i].x(), mat[i].y(), mat[i].z(), mat[i].w()});
+    else
+      j.push_back({mat[i].x() / 4096.0f, mat[i].y() / 4096.0f, mat[i].z() / 4096.0f, mat[i].w()});
+  }
+  return j;
+};
+
+nlohmann::json extract_shrub(const shrub_types::DrawableTreeInstanceShrub* tree,
+                             const std::string& debug_name,
+                             const std::vector<level_tools::TextureRemap>& map,
+                             const TextureDB& tex_db,
+                             const std::vector<std::pair<int, int>>& /*expected_missing_textures*/,
+                             tfrag3::Level& out,
+                             bool dump_level,
+                             GameVersion version) {
+  nlohmann::json shrub_tree_info;
+  //shrub_tree_info = nlohmann::json::array();
+
   auto& tree_out = out.shrub_trees.emplace_back();
 
   if (version > GameVersion::Jak1) {
@@ -584,8 +861,16 @@ void extract_shrub(const shrub_types::DrawableTreeInstanceShrub* tree,
 
   auto& protos = tree->info.prototype_inline_array_shrub;
   std::vector<ShrubProtoInfo> proto_info;
+  auto obj_path = file_util::get_jak_project_dir() / "decompiler_out" /
+                  game_version_names[version] / "levels" / out.level_name /
+                  fmt::format("{}-background", out.level_name);
+  auto shrub_path = obj_path / "shrub";
+  auto shrub_proto_path = shrub_path / "protos";
+  file_util::create_dir_if_needed(obj_path);
+  file_util::create_dir_if_needed(shrub_path);
+  file_util::create_dir_if_needed(shrub_proto_path);
   for (auto& proto : protos.data) {
-    proto_info.push_back(extract_proto(proto, tex_db, map, version));
+    proto_info.push_back(extract_proto(proto, tex_db, map, shrub_proto_path, out, version));
     tree_out.proto_names.push_back(proto.name);
   }
 
@@ -597,6 +882,29 @@ void extract_shrub(const shrub_types::DrawableTreeInstanceShrub* tree,
       }
     }
   }
+  shrub_tree_info["protos"] = nlohmann::json::array();
+  for (auto& proto : proto_info) {
+    if (proto.stiffness == 0)
+      continue;
+    nlohmann::json proto_json;
+    proto_json["name"] = proto.name;
+    proto_json["flags"] = proto.flags;
+    proto_json["stiffness"] = proto.stiffness;
+    proto_json["instances"] = nlohmann::json::array();
+    for (auto& inst : proto.instances) {
+      nlohmann::json inst_json;
+      inst_json["bsphere"] = vectorm_shrub_json(inst.bsphere);
+      inst_json["proto-idx"] = inst.proto_idx;
+      inst_json["color-idx"] = inst.color_idx;
+      inst_json["wind-index"] = inst.wind_index;
+      inst_json["mat"] = to_shrub_json_matrix(inst.mat);
+      proto_json["instances"].push_back(inst_json);
+    }
+    shrub_tree_info["protos"].push_back(proto_json);
+  }
+
+  //file_util::write_text_file(obj_path / fmt::format("{}_info.json", debug_name),
+  //                           shrub_tree_info.dump(2));
 
   // time of day colors
   tree_out.time_of_day_colors = pack_colors(tree->time_of_day);
@@ -604,9 +912,10 @@ void extract_shrub(const shrub_types::DrawableTreeInstanceShrub* tree,
   make_draws(out, tree_out, proto_info, tex_db);
 
   if (dump_level) {
-    auto path = file_util::get_file_path({fmt::format("debug_out/shrub_all/{}.obj", debug_name)});
-    file_util::create_dir_if_needed_for_file(path);
-    file_util::write_text_file(path, dump_full_to_obj(proto_info));
+    std::string allShrub = dump_full_to_obj(proto_info,tex_db, out);
+    std::string idx = debug_name.substr(debug_name.find_first_of('-') + 1, 1);
+    file_util::write_text_file(shrub_path / fmt::format("shrub-{}.obj", idx), allShrub);
   }
+  return shrub_tree_info;
 }
 }  // namespace decompiler

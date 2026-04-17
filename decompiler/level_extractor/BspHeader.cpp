@@ -1877,12 +1877,27 @@ void EntityActor::read_from_file(TypedRef ref,
     Ref NodesRef = deref_label(get_field_ref(NavTRef, "nodes", dts));
     NodesRef.byte_offset += 16;  // Skip inline array header
     for (int i = 0; i < nav_mesh.node_count; i++) {
+      TypedRef NodesTRef(NodesRef, dts.ts.lookup_type("nav-node"));
+      // memcpy_plain_data(reinterpret_cast<u8*>(&node), NodesRef, sizeof(Nav_Node));
       auto& node = nav_mesh.nodes.emplace_back();
-      memcpy_plain_data(reinterpret_cast<u8*>(&node), NodesRef, sizeof(Nav_Node));
+      node.center_x = read_plain_data_field<float>(NodesTRef, "center-x", dts);
+      node.center_y = read_plain_data_field<float>(NodesTRef, "center-y", dts);
+      node.center_z = read_plain_data_field<float>(NodesTRef, "center-z", dts);
+      node.type = read_plain_data_field<u16>(NodesTRef, "type", dts);
+      node.parent_offset = read_plain_data_field<u16>(NodesTRef, "parent-offset", dts);
+      node.radius_x = read_plain_data_field<float>(NodesTRef, "radius-x", dts);
+      node.radius_y = read_plain_data_field<float>(NodesTRef, "radius-y", dts);
+      node.radius_z = read_plain_data_field<float>(NodesTRef, "radius-z", dts);
+      node.left_offset = read_plain_data_field<u16>(NodesTRef, "left-offset", dts);
+      node.right_offset = read_plain_data_field<u16>(NodesTRef, "right-offset", dts);
+      //node.scale_x = read_plain_data_field<float>(NodesTRef, "scale-x", dts);
+      memcpy_plain_data(reinterpret_cast<u8*>(node.first_tris), get_field_ref(NodesTRef, "first-tris", dts), 4);
+      //node.scale_z = read_plain_data_field<float>(NodesTRef, "scale-z", dts);
+      memcpy_plain_data(reinterpret_cast<u8*>(node.last_tris), get_field_ref(NodesTRef, "last-tris", dts), 4);
       // Advance pointer
       NodesRef.byte_offset += 16;
     }
-
+    
 
     nav_mesh.vertex_count = read_plain_data_field<int>(NavTRef, "vertex-count", dts);
     nav_mesh.vertex.reserve(nav_mesh.vertex_count);

@@ -21,6 +21,7 @@
 #include "decompiler/level_extractor/extract_tfrag.h"
 #include "decompiler/level_extractor/extract_tie.h"
 #include "decompiler/level_extractor/fr3_to_gltf.h"
+#include "decompiler/level_extractor/fr3_to_obj.h"
 #include "goalc/build_actor/jak1/build_actor.h"
 
 namespace decompiler {
@@ -153,10 +154,10 @@ void extract_art_groups_from_level(const ObjectFileDB& db,
         extract_merc(ag_file, tex_db, db.dts, tex_remap, level_data, false, db.version(),
                      swapped_info, art_group_data);
         extract_joint_group(ag_file, db.dts, db.version(), art_group_data);
-        extract_joint_anim(ag_file, db.dts, db.version(), art_group_data, false);
+        //extract_joint_anim(ag_file, db.dts, db.version(), art_group_data, false);
       }
     }
-    export_anim_as_json(level_data.level_name, db.version(), art_group_data, false);
+    //export_anim_as_json(level_data.level_name, db.version(), art_group_data, false);
   }
 }
 
@@ -197,7 +198,8 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
                                               const TextureDB& tex_db,
                                               const std::string& dgo_name,
                                               const Config& config,
-                                              tfrag3::Level& level_data) {
+                                              tfrag3::Level& level_data,
+                                              nlohmann::json& json_data) {
   auto hacks = config.hacks;
   auto bsp_rec = get_bsp_file(db.obj_files_by_dgo.at(dgo_name), dgo_name);
   if (!bsp_rec) {
@@ -222,6 +224,8 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
     bsp_header.name = "demo";
   }
 
+  json_data["name"] = bsp_header.name;
+
   /*
   level_tools::PrintSettings settings;
   settings.expand_collide = true;
@@ -242,8 +246,17 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
     }
   }
 
+  int tfrag_count = 0;
+  int tie_count = 0;
+  int shrub_count = 0;
+
+  json_data["tfrag-trees"] = nlohmann::json::array();
+  json_data["tie-trees"] = nlohmann::json::array();
+  json_data["shrub-trees"] = nlohmann::json::array();
+
   bool got_collide = false;
   for (auto& draw_tree : bsp_header.drawable_tree_array.trees) {
+    level_data.level_name = bsp_header.name;
     if (tfrag_trees.count(draw_tree->my_type())) {
       auto as_tfrag_tree = dynamic_cast<level_tools::DrawableTreeTfrag*>(draw_tree.get());
       ASSERT(as_tfrag_tree);
@@ -258,20 +271,23 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
           atest_disable_flag = true;
         }
       }
-      extract_tfrag(as_tfrag_tree, fmt::format("{}-{}", dgo_name, i++),
+      json_data["tfrag-trees"].push_back(extract_tfrag(
+                    as_tfrag_tree, fmt::format("tfrag-{}", tfrag_count++),
                     bsp_header.texture_remap_table, tex_db, expected_missing_textures, level_data,
-                    false, bsp_header.name, atest_disable_flag);
+                    true, bsp_header.name, atest_disable_flag, config.game_version));
     } else if (draw_tree->my_type() == "drawable-tree-instance-tie") {
       auto as_tie_tree = dynamic_cast<level_tools::DrawableTreeInstanceTie*>(draw_tree.get());
       ASSERT(as_tie_tree);
-      extract_tie(as_tie_tree, fmt::format("{}-{}-tie", dgo_name, i++),
-                  bsp_header.texture_remap_table, tex_db, level_data, false, db.version());
+      json_data["tie-trees"].push_back(extract_tie(
+                    as_tie_tree, fmt::format("{}-{}-tie", dgo_name, tie_count++),
+                    bsp_header.texture_remap_table, tex_db, level_data, true, db.version()));
     } else if (draw_tree->my_type() == "drawable-tree-instance-shrub") {
       auto as_shrub_tree =
           dynamic_cast<level_tools::shrub_types::DrawableTreeInstanceShrub*>(draw_tree.get());
       ASSERT(as_shrub_tree);
-      extract_shrub(as_shrub_tree, fmt::format("{}-{}-shrub", dgo_name, i++),
-                    bsp_header.texture_remap_table, tex_db, {}, level_data, false, db.version());
+      json_data["shrub-trees"].push_back(extract_shrub(
+                    as_shrub_tree, fmt::format("{}-{}-shrub", dgo_name, shrub_count++),
+                    bsp_header.texture_remap_table, tex_db, {}, level_data, true, db.version()));
     } else if (draw_tree->my_type() == "drawable-tree-collide-fragment" &&
                config.extract_collision) {
       auto as_collide_frags =
@@ -279,8 +295,7 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
       ASSERT(as_collide_frags);
       ASSERT(!got_collide);
       got_collide = true;
-      extract_collide_frags(as_collide_frags, all_ties, config,
-                            fmt::format("{}-{}-collide", dgo_name, i++), level_data);
+      extract_collide_frags(as_collide_frags, all_ties, config, bsp_header.name, level_data);
     } else {
       lg::print("  unsupported tree {}\n", draw_tree->my_type());
     }
@@ -398,11 +413,12 @@ void extract_from_level(const ObjectFileDB& db,
     return;
   }
   tfrag3::Level level_data;
+  nlohmann::json json_level_data;
   std::map<std::string, level_tools::ArtData> art_group_data;
   add_all_textures_from_level(level_data, dgo_name, tex_db);
 
   // the bsp header file data
-  auto bsp_header = extract_bsp_from_level(db, tex_db, dgo_name, config, level_data);
+  auto bsp_header = extract_bsp_from_level(db, tex_db, dgo_name, config, level_data, json_level_data);
   extract_art_groups_from_level(db, tex_db, bsp_header.texture_remap_table, dgo_name, level_data,
                                 art_group_data);
 
@@ -418,12 +434,20 @@ void extract_from_level(const ObjectFileDB& db,
                                compressed.data(), compressed.size());
 
   if (config.rip_levels) {
-    auto back_file_path = file_util::get_jak_project_dir() / "decompiler_out" /
+
+    auto back_file_path_gltf = file_util::get_jak_project_dir() / "decompiler_out" /
                           game_version_names[config.game_version] / "levels" /
                           level_data.level_name /
                           fmt::format("{}-background.glb", level_data.level_name);
-    file_util::create_dir_if_needed_for_file(back_file_path);
-    save_level_background_as_gltf(level_data, back_file_path);
+    file_util::create_dir_if_needed_for_file(back_file_path_gltf);
+    // save_level_background_as_gltf(level_data, back_file_path_gltf);
+
+    auto back_file_path_obj = file_util::get_jak_project_dir() / "decompiler_out" /
+                              game_version_names[config.game_version] / "levels" /
+                              level_data.level_name / fmt::format("{}-background", level_data.level_name);
+    file_util::create_dir_if_needed_for_file(back_file_path_obj);
+    save_level_background_as_obj(level_data, back_file_path_obj, json_level_data);
+
     auto fore_file_path = file_util::get_jak_project_dir() / "decompiler_out" /
                           game_version_names[config.game_version] / "levels" /
                           level_data.level_name;
@@ -441,6 +465,13 @@ void extract_from_level(const ObjectFileDB& db,
         extract_ambients_to_json(bsp_header.ambients));
 
   out_art_group_data = std::move(art_group_data);
+
+  auto level_path = file_util::get_jak_project_dir() / "decompiler_out" /
+                    game_version_names[db.version()] / "levels" / level_data.level_name /
+                    fmt::format("{}-background", level_data.level_name);
+
+  file_util::write_text_file(level_path / fmt::format("{}_info.jfp", level_data.level_name),
+                             json_level_data.dump(2));
 }
 
 void extract_all_levels(const ObjectFileDB& db,

@@ -251,6 +251,9 @@ void TieTree::unpack() {
         vtx.s = proto_vtx.s;
         vtx.t = proto_vtx.t;
         vtx.nor = pack_to_gl_normal(proto_vtx.nx << 1, proto_vtx.ny << 1, proto_vtx.nz << 1);
+        vtx.nx = proto_vtx.nx << 1;
+        vtx.ny = proto_vtx.ny << 1;
+        vtx.nz = proto_vtx.nz << 1;
         vtx.r = proto_vtx.r;
         vtx.g = proto_vtx.g;
         vtx.b = proto_vtx.b;
@@ -281,6 +284,16 @@ void TieTree::unpack() {
           vtx.s = proto_vtx.s;
           vtx.t = proto_vtx.t;
           vtx.nor = unpack_tie_normal(nmat, proto_vtx.nx, proto_vtx.ny, proto_vtx.nz);
+
+          math::Vector3f nrm = math::Vector3f::zero();
+          nrm += nmat[0] * proto_vtx.nx;
+          nrm += nmat[1] * proto_vtx.ny;
+          nrm += nmat[2] * proto_vtx.nz;
+          nrm.normalize();
+          vtx.nx = nrm[0];
+          vtx.ny = nrm[1];
+          vtx.nz = nrm[2];
+
           vtx.r = proto_vtx.r;
           vtx.g = proto_vtx.g;
           vtx.b = proto_vtx.b;

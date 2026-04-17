@@ -18,7 +18,7 @@ namespace tfrag3 {
 // - if changing any large things (vertices, vis, bvh, colors, textures) update get_memory_usage
 // - if adding a new category to the memory usage, update extract_level to print it.
 
-constexpr int TFRAG3_VERSION = 43;
+constexpr int TFRAG3_VERSION = 44;
 
 enum MemoryUsageCategory {
   TEXTURE,
@@ -91,6 +91,8 @@ struct PreloadedVertex {
   u8 r = 0, g = 0, b = 0, a = 0;
   // texture coordinates
   float s = 0, t = 0;
+  // normal
+  float nx = 0, ny = 0, nz = 0;
 
   // not used in == or hash!!
   // note that this is a 10-bit 3-element field packed into 32-bits.
@@ -108,7 +110,7 @@ struct PreloadedVertex {
            color_index == other.color_index;
   }
 };
-static_assert(sizeof(PreloadedVertex) == 32, "PreloadedVertex size");
+static_assert(sizeof(PreloadedVertex) == 44, "PreloadedVertex size");
 
 struct PackedTieVertices {
   struct Vertex {
@@ -178,6 +180,8 @@ struct PackedShrubVertices {
     u32 start_vert;
     u32 end_vert;
     u16 color_index;
+    u16 wind_idx = 0;
+    float stiffness = 0;
   };
   std::vector<std::array<math::Vector4f, 4>> matrices;
   std::vector<InstanceGroup> instance_groups;  // todo pack

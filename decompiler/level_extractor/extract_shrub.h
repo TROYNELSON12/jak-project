@@ -18,13 +18,13 @@ namespace decompiler {
 /// <param name="expected_missing_textures"></param>
 /// <param name="out"></param>
 /// <param name="dump_level"></param>
-void extract_shrub(const level_tools::shrub_types::DrawableTreeInstanceShrub* tree,
-                   const std::string& debug_name,
-                   const std::vector<level_tools::TextureRemap>& map,
-                   const TextureDB& tex_db,
-                   const std::vector<std::pair<int, int>>& expected_missing_textures,
-                   tfrag3::Level& out,
-                   bool dump_level,
-                   GameVersion version);
+nlohmann::json extract_shrub(const level_tools::shrub_types::DrawableTreeInstanceShrub* tree,
+                             const std::string& debug_name,
+                             const std::vector<level_tools::TextureRemap>& map,
+                             const TextureDB& tex_db,
+                             const std::vector<std::pair<int, int>>& expected_missing_textures,
+                             tfrag3::Level& out,
+                             bool dump_level,
+                             GameVersion version);
 
 }  // namespace decompiler

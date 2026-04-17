@@ -92,7 +92,7 @@ add_library(
         VuDisasm/VuInstruction.cpp
 
         config.cpp
-        decompilation_process.cpp)
+        decompilation_process.cpp "level_extractor/fr3_to_obj.cpp" "level_extractor/fr3_to_obj.h")
 
 target_link_libraries(decomp
         lzokay
@@ -104,7 +104,7 @@ target_link_libraries(decomp
         )
 
 add_executable(decompiler
-        main.cpp)
+        main.cpp "level_extractor/fr3_to_obj.cpp" "level_extractor/fr3_to_obj.h")
 
 target_link_libraries(decompiler
         decomp
@@ -116,7 +116,7 @@ target_link_libraries(decompiler
 
 
 add_executable(extractor
-        extractor/main.cpp)
+        extractor/main.cpp "level_extractor/fr3_to_obj.cpp" "level_extractor/fr3_to_obj.h")
 
 target_link_libraries(extractor
         decomp

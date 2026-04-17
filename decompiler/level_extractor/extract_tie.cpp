@@ -8,6 +8,9 @@
 
 #include "decompiler/ObjectFile/LinkedObjectFile.h"
 
+#include "third-party/tiny_gltf/tiny_gltf.h"
+#include "third-party/stb_image/stb_image_write.h"
+
 // Jak 2 notes:
 // - proto flags are currently ignored, but stored.
 
@@ -251,6 +254,44 @@ struct TieProtoVertex {
   // then you look up the color in the _proto_'s interpolated color palette.
   u32 color_index_index;
   math::Vector<u8, 4> envmap_tint_color;
+
+  int frag_index;
+
+  bool operator==(const TieProtoVertex& other) const {
+    return pos.x() == other.pos.x() &&
+           pos.y() == other.pos.y() &&
+           pos.z() == other.pos.z() &&
+           tex.x() == other.tex.x() &&
+           tex.y() == other.tex.y() &&
+           nrm.x() == other.nrm.x() &&
+           nrm.y() == other.nrm.y() &&
+           nrm.z() == other.nrm.z() &&
+           color_index_index == other.color_index_index &&
+           envmap_tint_color.x() == other.envmap_tint_color.x() &&
+           envmap_tint_color.y() == other.envmap_tint_color.y() &&
+           envmap_tint_color.z() == other.envmap_tint_color.z() &&
+           envmap_tint_color.w() == other.envmap_tint_color.w() &&
+           frag_index == other.frag_index;
+  }
+
+  struct hash {
+    std::size_t operator()(const TieProtoVertex& x) const {
+      return std::hash<float>()(x.pos.x()) ^
+             std::hash<float>()(x.pos.y()) ^
+             std::hash<float>()(x.pos.z()) ^
+             std::hash<float>()(x.tex.x()) ^
+             std::hash<float>()(x.tex.y()) ^
+             std::hash<float>()(x.nrm.x()) ^
+             std::hash<float>()(x.nrm.y()) ^
+             std::hash<float>()(x.nrm.z()) ^
+             std::hash<u32>()(x.color_index_index) ^
+             std::hash<float>()(x.envmap_tint_color.x()) ^
+             std::hash<float>()(x.envmap_tint_color.y()) ^
+             std::hash<float>()(x.envmap_tint_color.z()) ^
+             std::hash<float>()(x.envmap_tint_color.w()) ^
+             std::hash<int>()(x.frag_index);
+    }
+  };
 };
 
 // a tie fragment is made up of strips. Each strip has a single adgif info, and vertices
@@ -576,6 +617,15 @@ struct TieCategoryInfo {
   tfrag3::TieCategory envmap_second_draw_category = tfrag3::TieCategory::NORMAL_ENVMAP;
   bool uses_envmap = false;
 };
+
+TieCategoryInfo get_jak1_tie_category(u32 flags) {
+  TieCategoryInfo result;
+  result.uses_envmap = flags & 2;
+  result.category =
+      result.uses_envmap ? tfrag3::TieCategory::NORMAL_ENVMAP : tfrag3::TieCategory::NORMAL;
+  result.envmap_second_draw_category = tfrag3::TieCategory::NORMAL_ENVMAP_SECOND_DRAW;
+  return result;
+}
 
 TieCategoryInfo get_jak2_tie_category(u32 flags) {
   constexpr int kJak2ProtoEnvmap = 2;
@@ -1946,63 +1996,69 @@ void emulate_kicks(std::vector<TieProtoInfo>& protos) {
 
 // from here on, we are mostly converting the "info" formats to the C++ renderer format (tfrag3)
 
-/*!
- * Just used to debug, save a proto as an .obj mesh file.
- */
-std::string debug_dump_proto_to_obj(const TieProtoInfo& proto) {
-  std::vector<math::Vector<float, 3>> verts;
-  std::vector<math::Vector<float, 2>> tcs;
-  std::vector<math::Vector<int, 3>> faces;
+void export_frag_lut_texture(const TieProtoInfo& proto,
+                             const fs::path& output_dir) {
+  // 1️ Find max number of color indices in any fragment
+  u32 max_color_indices_per_frag = 0;
+  u32 total_frag_count = 0;
 
-  for (auto& frag : proto.frags) {
-    for (auto& strip : frag.strips) {
-      // add verts...
-      ASSERT(strip.verts.size() >= 3);
-
-      int vert_idx = 0;
-
-      int vtx_idx_queue[3];
-
-      int q_idx = 0;
-      int startup = 0;
-      while (vert_idx < (int)strip.verts.size()) {
-        verts.push_back(strip.verts.at(vert_idx).pos / 65536);  // no idea
-        tcs.push_back(math::Vector<float, 2>{strip.verts.at(vert_idx).tex.x(),
-                                             strip.verts.at(vert_idx).tex.y()});
-        vert_idx++;
-        vtx_idx_queue[q_idx++] = verts.size();
-
-        // wrap the index
-        if (q_idx == 3) {
-          q_idx = 0;
-        }
-
-        // bump the startup
-        if (startup < 3) {
-          startup++;
-        }
-
-        if (startup >= 3) {
-          faces.push_back(
-              math::Vector<int, 3>{vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
-        }
-      }
+  for (auto& inst : proto.instances) {
+    for (auto& frag : inst.frags) {
+      max_color_indices_per_frag =
+          std::max(max_color_indices_per_frag, (u32)frag.color_indices.size());
+      total_frag_count++;
     }
   }
 
-  std::string result;
-  for (auto& vert : verts) {
-    result += fmt::format("v {} {} {}\n", vert.x(), vert.y(), vert.z());
-  }
-  for (auto& tc : tcs) {
-    result += fmt::format("vt {} {}\n", tc.x(), tc.y());
-  }
-  for (auto& face : faces) {
-    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x(), face.x(), face.y(), face.y(), face.z(),
-                          face.z());
+  // 2️ Each texel stores 4 indices (RGBA), so width = ceil(max_color_indices / 4)
+  u32 lut_width = (max_color_indices_per_frag + 3) / 4;
+  u32 lut_height = total_frag_count;
+
+  tinygltf::Image image;
+  image.width = lut_width;
+  image.height = lut_height;
+  image.component = 4;  // RGBA
+  image.bits = 8;
+  image.pixel_type = TINYGLTF_TEXTURE_TYPE_UNSIGNED_BYTE;
+  image.image.resize(lut_width * lut_height * 4);
+
+  // 3️ Fill the texture
+  u32 frag_row = 0;
+  for (auto& inst : proto.instances) {
+    for (auto& frag : inst.frags) {
+      for (u32 i = 0; i < frag.color_indices.size(); i++) {
+        u32 texel_x = i / 4;
+        u32 channel = i % 4;
+
+        u32 pixel_idx = (frag_row * lut_width + texel_x) * 4;
+        image.image[pixel_idx + channel] = frag.color_indices[i];
+      }
+
+      // Fill remaining channels with 0 if color_indices.size() % 4 != 0
+      u32 last_texel_x = (frag.color_indices.size() + 3) / 4 - 1;
+      u32 remaining_channels = 4 - (frag.color_indices.size() % 4);
+      if (remaining_channels < 4) {
+        u32 pixel_idx = (frag_row * lut_width + last_texel_x) * 4;
+        for (u32 c = 4 - remaining_channels; c < 4; c++)
+          image.image[pixel_idx + c] = 0;
+      }
+
+      frag_row++;
+    }
   }
 
-  return result;
+  // 4️ Save the texture
+  auto lut_path = output_dir / fmt::format("{}_lut.png", proto.name);
+  file_util::create_dir_if_needed_for_file(lut_path);
+
+  int result = stbi_write_png(lut_path.string().c_str(), image.width, image.height, image.component,
+                              image.image.data(), image.width * image.component);
+
+  if (!result) {
+    lg::error("Failed to export frag LUT texture: {}", lut_path.string());
+  } else {
+    lg::info("Exported frag LUT texture: {}", lut_path.string());
+  }
 }
 
 /*!
@@ -2015,71 +2071,6 @@ math::Vector<float, 3> transform_tie(const std::array<math::Vector4f, 4> mat,
   result.x() = temp.x();
   result.y() = temp.y();
   result.z() = temp.z();
-  return result;
-}
-
-/*!
- * Dump the entire tie tree to an obj. Used to debug the transform_tie function. If we get this
- * right, it should fit in with .obj's produced from the tfrag debug.
- */
-std::string dump_full_to_obj(const std::vector<TieProtoInfo>& protos) {
-  std::vector<math::Vector<float, 3>> verts;
-  std::vector<math::Vector<float, 2>> tcs;
-  std::vector<math::Vector<int, 3>> faces;
-
-  for (auto& proto : protos) {
-    for (auto& inst : proto.instances) {
-      auto& mat = inst.mat;
-      for (auto& frag : proto.frags) {
-        for (auto& strip : frag.strips) {
-          // add verts...
-          ASSERT(strip.verts.size() >= 3);
-
-          int vert_idx = 0;
-
-          int vtx_idx_queue[3];
-
-          int q_idx = 0;
-          int startup = 0;
-          while (vert_idx < (int)strip.verts.size()) {
-            verts.push_back(transform_tie(mat, strip.verts.at(vert_idx).pos) / 65536);  // no idea
-            tcs.push_back(math::Vector<float, 2>{strip.verts.at(vert_idx).tex.x(),
-                                                 strip.verts.at(vert_idx).tex.y()});
-            vert_idx++;
-            vtx_idx_queue[q_idx++] = verts.size();
-
-            // wrap the index
-            if (q_idx == 3) {
-              q_idx = 0;
-            }
-
-            // bump the startup
-            if (startup < 3) {
-              startup++;
-            }
-
-            if (startup >= 3) {
-              faces.push_back(
-                  math::Vector<int, 3>{vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
-            }
-          }
-        }
-      }
-    }
-  }
-
-  std::string result;
-  for (auto& vert : verts) {
-    result += fmt::format("v {} {} {}\n", vert.x(), vert.y(), vert.z());
-  }
-  for (auto& tc : tcs) {
-    result += fmt::format("vt {} {}\n", tc.x(), tc.y());
-  }
-  for (auto& face : faces) {
-    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x(), face.x(), face.y(), face.y(), face.z(),
-                          face.z());
-  }
-
   return result;
 }
 
@@ -2330,15 +2321,6 @@ DrawMode process_envmap_draw_mode(const AdgifInfo& info,
   return mode;
 }
 
-TieCategoryInfo get_jak1_tie_category(u32 flags) {
-  TieCategoryInfo result;
-  result.uses_envmap = flags & 2;
-  result.category =
-      result.uses_envmap ? tfrag3::TieCategory::NORMAL_ENVMAP : tfrag3::TieCategory::NORMAL;
-  result.envmap_second_draw_category = tfrag3::TieCategory::NORMAL_ENVMAP_SECOND_DRAW;
-  return result;
-}
-
 s32 get_or_add_texture(u32 combo_tex, tfrag3::Level& lev, const TextureDB& tdb) {
   if (combo_tex == 0) {
     // untextured
@@ -2385,6 +2367,467 @@ s32 get_or_add_texture(u32 combo_tex, tfrag3::Level& lev, const TextureDB& tdb) 
     return -int(it->second) - 1;
   }
   return idx_in_lev_data;
+}
+
+math::Vector3f vopmula(math::Vector3f a, math::Vector3f b) {
+  return math::Vector3f(a.y() * b.z(), a.z() * b.x(), a.x() * b.y());
+}
+
+math::Vector3f vopmsub(math::Vector3f acc, math::Vector3f a, math::Vector3f b) {
+  return acc - vopmula(a, b);
+}
+
+/*!
+ * Compute the normal transformation for a TIE from the TIE matrix. This will return properly scaled
+ * normals.
+ */
+std::array<math::Vector3f, 3> tie_normal_transform_v2(const std::array<math::Vector4f, 4>& m) {
+  // let:
+  // vf10, vf11, vf12, vf13 be the input matrix m
+  std::array<math::Vector3f, 3> result;
+  auto& vf10 = m[0];
+  auto& vf11 = m[1];
+  // auto& vf12 = m[2];
+
+  //  lui t6, 16256
+  //  mtc1 f1, t6 ;; 1.0
+  //
+  //  qmfc2.i s1, vf10
+  //  mtc1 f12, s1
+  float f12 = vf10.x();
+  //  dsra32 s2, s1, 0
+  //  mtc1 f13, s2
+  float f13 = vf10.y();
+  //  pextuw s2, r0, s2
+  //  mtc1 f14, s2
+  float f14 = vf10.z();
+  //  mula.s f12, f12
+  //  madda.s f13, f13
+  //  madd.s f15, f14, f14
+  float f15 = f12 * f12 + f13 * f13 + f14 * f14;
+  float scale = 1.f / sqrtf(f15);
+  //  rsqrt.s f15, f1, f15
+  //  mfc1 s1, f15
+  //  qmtc2.i vf14, s1
+  //  vmulx.xyz vf16, vf10, vf14
+
+  // vmulx.xyz vf16, vf10, vf14
+  math::Vector3f vf16 = vf10.xyz() * scale;
+
+  // vopmula.xyz acc, vf11, vf16
+  math::Vector3f acc = vopmula(vf11.xyz(), vf16);
+
+  // vopmsub.xyz vf17, vf16, vf11
+  math::Vector3f vf17 = vopmsub(acc, vf16, vf11.xyz());
+
+  // vopmula.xyz acc, vf16, vf17
+  acc = vopmula(vf16, vf17);
+
+  // vopmsub.xyz vf17, vf17, vf16
+  vf17 = vopmsub(acc, vf17, vf16);
+
+  // vmul.xyz vf14, vf17, vf17
+  math::Vector3f vf14 = vf17.elementwise_multiply(vf17);
+
+  // vmulax.w acc, vf0, vf14
+  // vmadday.w acc, vf0, vf14
+  // vmaddz.w vf14, vf0, vf14
+  float sum = vf14.x() + vf14.y() + vf14.z();
+
+  // vrsqrt Q, vf0.w, vf14.w
+  float Q = 1.f / std::sqrt(sum);
+
+  // vmulax.xyzw acc, vf24, vf16
+  // vmadday.xyzw acc, vf25, vf16
+  // vmaddz.xyzw vf10, vf26, vf16
+  // vf10 = vf16; // assume cam is identity here.
+  result[0] = vf16;
+
+  // vwaitq
+  // vmulq.xyz vf17, vf17, Q
+  vf17 *= Q;
+
+  // vopmula.xyz acc, vf16, vf17
+  acc = vopmula(vf16, vf17);
+  // vopmsub.xyz vf18, vf17, vf16
+  math::Vector3f vf18 = vopmsub(acc, vf17, vf16);
+
+  // vmulax.xyzw acc, vf24, vf17
+  // vmadday.xyzw acc, vf25, vf17
+  // vmaddz.xyzw vf11, vf26, vf17
+  result[1] = vf17;
+
+  // vmulax.xyzw acc, vf24, vf18
+  // vmadday.xyzw acc, vf25, vf18
+  // vmaddz.xyzw vf12, vf26, vf18
+  result[2] = vf18;
+
+  return result;
+  //
+  // sqc2 vf10, -112(t8)
+  // sqc2 vf11, -96(t8)
+  // sqc2 vf12, -80(t8)
+}
+
+int get_or_add_vertex(const TieProtoVertex& v,
+                      std::vector<TieProtoVertex>& unique_verts,
+                      std::unordered_map<TieProtoVertex, int, TieProtoVertex::hash>& lookup) {
+  auto it = lookup.find(v);
+  if (it != lookup.end())
+    return it->second;
+
+  int idx = unique_verts.size();
+  unique_verts.push_back(v);
+  lookup[v] = idx;
+  return idx;
+}
+
+/*!
+ * Just used to debug, save a proto as an .obj mesh file.
+ */
+std::string debug_dump_proto_to_obj(const TieProtoInfo& proto,
+                                    tfrag3::Level& lev,
+                                    const TextureDB& tdb,
+                                    GameVersion version) {
+  //std::vector<math::Vector<float, 3>> verts;
+  //std::vector<math::Vector<u8, 4>> cols;
+  //std::vector<math::Vector<float, 3>> norms;
+  //std::vector<math::Vector<float, 2>> txcrds;
+  //std::vector<float> tods;
+  //std::vector<float> frags;
+
+  TieCategoryInfo info;
+  switch (version) {
+    case GameVersion::Jak1:
+      info = get_jak1_tie_category(proto.proto_flag);
+      break;
+    case GameVersion::Jak2:
+    case GameVersion::Jak3:
+      info = get_jak2_tie_category(proto.proto_flag);
+      break;
+    default:
+      ASSERT_NOT_REACHED();
+  }
+
+  std::vector<TieProtoVertex> unique_verts;
+  std::unordered_map<TieProtoVertex, int, TieProtoVertex::hash> lookup;
+
+  struct MatKey {
+    u32 tex;
+    u32 mode;
+
+    bool operator==(const MatKey& o) const { return tex == o.tex && mode == o.mode; }
+  };
+
+  struct MatKeyHash {
+    size_t operator()(const MatKey& k) const { return (size_t(k.tex) << 32) ^ size_t(k.mode); }
+  };
+
+  std::unordered_map<MatKey, std::vector<math::Vector<int, 3>>, MatKeyHash> grouped_faces;
+
+  bool uses_envmap = false;
+  s32 envmap_tex_idx = 0;
+  DrawMode envmap_drawmode;
+  if (info.uses_envmap) {
+    envmap_tex_idx = get_or_add_texture(proto.envmap_adgif.value().combo_tex, lev, tdb);
+    envmap_drawmode = process_envmap_draw_mode(proto.envmap_adgif.value(), version,
+                                               info.envmap_second_draw_category);
+  }
+
+  int frag_idx = 0;
+  for (auto& frag : proto.frags) {
+    for (auto& strip : frag.strips) {
+      u32 tex = get_or_add_texture(strip.adgif.combo_tex, lev, tdb);
+      DrawMode mode = process_draw_mode(strip.adgif, frag.prog_info.misc_x == 0,
+                                        frag.has_magic_tex0_bit, version, info.category);
+      MatKey key{tex, mode.as_int()};
+      // add verts...
+      ASSERT(strip.verts.size() >= 3);
+
+      int vert_idx = 0;
+
+      int vtx_idx_queue[3];
+
+      int q_idx = 0;
+      int startup = 0;
+      while (vert_idx < (int)strip.verts.size()) {
+        TieProtoVertex v;
+        v.pos =               strip.verts.at(vert_idx).pos / 4096;
+        v.tex =               strip.verts.at(vert_idx).tex;
+        v.envmap_tint_color = strip.verts.at(vert_idx).envmap_tint_color;
+        v.nrm =               strip.verts.at(vert_idx).nrm;
+        v.color_index_index = strip.verts.at(vert_idx).color_index_index;
+        v.frag_index =        frag_idx;
+
+        int idx = get_or_add_vertex(v, unique_verts, lookup);
+
+        idx++;
+        vtx_idx_queue[q_idx++] = idx;
+
+        // wrap the index
+        if (q_idx == 3) {
+          q_idx = 0;
+        }
+
+        // bump the startup
+        if (startup < 3) {
+          startup++;
+        }
+
+        if (startup >= 3) {
+          grouped_faces[key].push_back(
+              math::Vector<int, 3>{vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
+        }
+
+        vert_idx++;
+      }
+    }
+    frag_idx++;
+  }
+
+  std::string result;
+  for (auto& v : unique_verts) {
+    result += fmt::format("v {} {} {}\n", v.pos.x(), v.pos.y(), v.pos.z());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vt {} {}\n", v.tex.x(), v.tex.y());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vp {}\n", v.color_index_index);
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vf {}\n", v.frag_index);
+  }
+  for (auto& v : unique_verts) {
+    auto& col = v.envmap_tint_color;
+    result += fmt::format("vc {} {} {} {}\n", col.x(), col.y(), col.z(), col.w());
+  }
+  for (auto& v : unique_verts) {
+    if (v.nrm.length() != 0)
+      v.nrm.normalize();
+    result += fmt::format("vn {} {} {}\n", v.nrm.x(), v.nrm.y(), v.nrm.z());
+  }
+  if (info.uses_envmap)
+    result += fmt::format("pr texture:{} drawmode:{}\n", envmap_tex_idx, envmap_drawmode.as_int());
+  for (auto& [key, face_list] : grouped_faces) {
+    result += fmt::format("d texture:{} drawmode:{}\n", key.tex, key.mode);
+
+    for (auto& f : face_list) {
+      result += fmt::format("f {} {} {}\n", f.x(), f.y(), f.z());
+    }
+  }
+
+  return result;
+}
+
+struct TieAllVertex {
+  math::Vector<float, 3> pos;  // position
+  math::Vector<float, 3> tex;  // texture coordinate
+  math::Vector<float, 3> nrm;  // normal
+  u32 color_index;
+  math::Vector<u8, 4> envmap_tint_color;
+
+  int frag_index;
+
+  bool operator==(const TieAllVertex& other) const {
+    return pos.x() == other.pos.x() &&
+           pos.y() == other.pos.y() &&
+           pos.z() == other.pos.z() &&
+           tex.x() == other.tex.x() &&
+           tex.y() == other.tex.y() &&
+           nrm.x() == other.nrm.x() &&
+           nrm.y() == other.nrm.y() &&
+           nrm.z() == other.nrm.z() &&
+           color_index == other.color_index &&
+           envmap_tint_color.x() == other.envmap_tint_color.x() &&
+           envmap_tint_color.y() == other.envmap_tint_color.y() &&
+           envmap_tint_color.z() == other.envmap_tint_color.z() &&
+           envmap_tint_color.w() == other.envmap_tint_color.w();
+  }
+
+  struct hash {
+    std::size_t operator()(const TieAllVertex& x) const {
+      return std::hash<float>()(x.pos.x()) ^
+             std::hash<float>()(x.pos.y()) ^
+             std::hash<float>()(x.pos.z()) ^
+             std::hash<float>()(x.tex.x()) ^
+             std::hash<float>()(x.tex.y()) ^
+             std::hash<float>()(x.nrm.x()) ^
+             std::hash<float>()(x.nrm.y()) ^
+             std::hash<float>()(x.nrm.z()) ^
+             std::hash<u32>()(x.color_index) ^
+             std::hash<float>()(x.envmap_tint_color.x()) ^
+             std::hash<float>()(x.envmap_tint_color.y()) ^
+             std::hash<float>()(x.envmap_tint_color.z()) ^
+             std::hash<float>()(x.envmap_tint_color.w());
+    }
+  };
+};
+
+int get_or_add_vertex(const TieAllVertex& v,
+                      std::vector<TieAllVertex>& unique_verts,
+                      std::unordered_map<TieAllVertex, int, TieAllVertex::hash>& lookup) {
+  auto it = lookup.find(v);
+  if (it != lookup.end())
+    return it->second;
+
+  int idx = unique_verts.size();
+  unique_verts.push_back(v);
+  lookup[v] = idx;
+  return idx;
+}
+
+/*!
+ * Dump the entire tie tree to an obj. Used to debug the transform_tie function. If we get this
+ * right, it should fit in with .obj's produced from the tfrag debug.
+ */
+std::string dump_full_to_obj(const std::vector<TieProtoInfo>& protos,
+                             tfrag3::Level& lev,
+                             const TextureDB& tdb,
+                             GameVersion version) {
+  // std::vector<math::Vector<float, 3>> verts;
+  // std::vector<math::Vector<float, 2>> tcs;
+  // std::vector<math::Vector<int, 3>> faces;
+
+  std::vector<TieAllVertex> unique_verts;
+  std::unordered_map<TieAllVertex, int, TieAllVertex::hash> lookup;
+
+  struct MatKey {
+    u32 tex;
+    u32 mode;
+    u32 envtex;
+    u32 envmode;
+    bool uses_envmap;
+
+    bool operator==(const MatKey& o) const {
+      return tex == o.tex && mode == o.mode && envtex == o.envtex && envmode == o.envmode;
+      uses_envmap == o.uses_envmap;
+    }
+  };
+
+  struct MatKeyHash {
+    size_t operator()(const MatKey& k) const {
+      return size_t(k.tex) ^ size_t(k.mode) ^ size_t(k.envtex) ^ size_t(k.envmode) ^
+             size_t(k.uses_envmap);
+    }
+  };
+
+  std::unordered_map<MatKey, std::vector<math::Vector<int, 3>>, MatKeyHash> grouped_faces;
+
+  for (auto& proto : protos) {
+    if (proto.stiffness != 0)
+      continue;
+    TieCategoryInfo info;
+    switch (version) {
+      case GameVersion::Jak1:
+        info = get_jak1_tie_category(proto.proto_flag);
+        break;
+      case GameVersion::Jak2:
+      case GameVersion::Jak3:
+        info = get_jak2_tie_category(proto.proto_flag);
+        break;
+      default:
+        ASSERT_NOT_REACHED();
+    }
+    u32 envmap_tex_idx;
+    DrawMode envmap_drawmode;
+    if (info.uses_envmap) {
+      envmap_tex_idx = get_or_add_texture(proto.envmap_adgif.value().combo_tex, lev, tdb);
+      envmap_drawmode = process_envmap_draw_mode(proto.envmap_adgif.value(), version,
+                                                 info.envmap_second_draw_category);
+    }
+    for (auto& inst : proto.instances) {
+      auto& mat = inst.mat;
+      int frag_idx = 0;
+      for (auto& frag : proto.frags) {
+        for (auto& strip : frag.strips) {
+          u32 tex = get_or_add_texture(strip.adgif.combo_tex, lev, tdb);
+          DrawMode mode = process_draw_mode(strip.adgif, frag.prog_info.misc_x == 0,
+                                            frag.has_magic_tex0_bit, version, info.category);
+          MatKey key;
+          if (info.uses_envmap)
+            key = {tex, mode.as_int(), envmap_tex_idx, envmap_drawmode.as_int(), true};
+          else
+            key = {tex, mode.as_int(), 0, 0, false};
+          // add verts...
+          ASSERT(strip.verts.size() >= 3);
+
+          int vert_idx = 0;
+
+          int vtx_idx_queue[3];
+
+          int q_idx = 0;
+          int startup = 0;
+          while (vert_idx < (int)strip.verts.size()) {
+            TieAllVertex v;
+            v.pos = transform_tie(mat, strip.verts.at(vert_idx).pos) / 4096;
+            v.tex = strip.verts.at(vert_idx).tex;
+            v.envmap_tint_color = strip.verts.at(vert_idx).envmap_tint_color;
+            auto nmat = tie_normal_transform_v2(mat);
+            v.nrm += nmat[0] * strip.verts.at(vert_idx).nrm.x();
+            v.nrm += nmat[1] * strip.verts.at(vert_idx).nrm.y();
+            v.nrm += nmat[2] * strip.verts.at(vert_idx).nrm.z();
+            v.nrm.normalize();
+            v.color_index =
+                inst.frags.at(frag_idx).color_indices.at(strip.verts.at(vert_idx).color_index_index) +
+                inst.frags.at(frag_idx).color_index_offset_in_big_palette;
+
+            int idx = get_or_add_vertex(v, unique_verts, lookup);
+
+            idx++;
+            vtx_idx_queue[q_idx++] = idx;
+
+            // wrap the index
+            if (q_idx == 3) {
+              q_idx = 0;
+            }
+
+            // bump the startup
+            if (startup < 3) {
+              startup++;
+            }
+
+            if (startup >= 3) {
+              grouped_faces[key].push_back(
+                  math::Vector<int, 3>{vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
+            }
+            vert_idx++;
+          }
+        }
+        frag_idx++;
+      }
+    }
+  }
+
+  std::string result;
+  for (auto& v : unique_verts) {
+    result += fmt::format("v {} {} {}\n", v.pos.x(), v.pos.y(), v.pos.z());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vt {} {}\n", v.tex.x(), v.tex.y());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vp {}\n", v.color_index);
+  }
+  for (auto& v : unique_verts) {
+    auto& col = v.envmap_tint_color;
+    result += fmt::format("vc {} {} {} {}\n", col.x(), col.y(), col.z(), col.w());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vn {} {} {}\n", v.nrm.x(), v.nrm.y(), v.nrm.z());
+  }
+  for (auto& [key, face_list] : grouped_faces) {
+    if (key.uses_envmap)
+      result += fmt::format("d texture:{} drawmode:{} envtexture:{} envdrawmode:{}\n", key.tex, key.mode, key.envtex, key.envmode);
+    else
+      result += fmt::format("d texture:{} drawmode:{}\n", key.tex, key.mode);
+
+    for (auto& f : face_list) {
+      result += fmt::format("f {} {} {}\n", f.x(), f.y(), f.z());
+    }
+  }
+
+  return result;
 }
 
 void handle_wind_draw_for_strip(
@@ -2745,13 +3188,35 @@ void merge_groups(std::vector<tfrag3::PackedTieVertices::MatrixGroup>& grps) {
   std::swap(result, grps);
 }
 
-void extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
-                 const std::string& debug_name,
-                 const std::vector<level_tools::TextureRemap>& tex_map,
-                 const TextureDB& tex_db,
-                 tfrag3::Level& out,
-                 bool dump_level,
-                 GameVersion version) {
+nlohmann::json vectorm_tie_json(const math::Vector4f v) {
+  nlohmann::json result;
+  for (int i = 0; i < 4; i++) {
+    result.push_back(v[i] / 4096.f);
+  }
+  return result;
+}
+
+auto to_tie_json_matrix = [](const std::array<math::Vector4f, 4>& mat) {
+  nlohmann::json j = nlohmann::json::array();
+  for (int i = 0; i < 4; i++) {
+    if (i != 3)
+      j.push_back({mat[i].x(), mat[i].y(), mat[i].z(), mat[i].w()});
+    else
+      j.push_back({mat[i].x() / 4096.0f, mat[i].y() / 4096.0f, mat[i].z() / 4096.0f, mat[i].w()});
+  }
+  return j;
+};
+
+
+nlohmann::json extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
+                           const std::string& debug_name,
+                           const std::vector<level_tools::TextureRemap>& tex_map,
+                           const TextureDB& tex_db,
+                           tfrag3::Level& out,
+                           bool dump_level,
+                           GameVersion version) {
+  nlohmann::json tie_tree_info;
+  //tie_tree_info = nlohmann::json::array();
   for (int geo = 0; geo < GEOM_MAX; ++geo) {
     // as far as I can tell, this one has bad colors
     if (debug_name == "PRECD.DGO-2-tie" && geo == 3) {
@@ -2804,25 +3269,56 @@ void extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
     emulate_tie_instance_program(info, version);
     emulate_kicks(info);
 
-    // debug save to .obj
-    if (dump_level) {
-      auto dir =
-          file_util::get_file_path({fmt::format("debug_out/lod{}-tie-{}/", geo, debug_name)});
-      file_util::create_dir_if_needed(dir);
-      for (auto& proto : info) {
-        auto data = debug_dump_proto_to_obj(proto);
-        file_util::write_text_file(fmt::format("{}/{}.obj", dir, proto.name), data);
-      }
-
-      auto full = dump_full_to_obj(info);
-      file_util::write_text_file(fmt::format("{}/ALL.obj", dir), full);
-    }
-
     // create time of day data.
     auto full_palette = make_big_palette(info);
 
     // create draws
     add_vertices_and_static_draw(this_tree, out, tex_db, info, version);
+
+    // debug save to .obj
+    if (dump_level && geo == 0) {
+      auto obj_path = file_util::get_jak_project_dir() / "decompiler_out" /
+                      game_version_names[version] / "levels" / out.level_name /
+                      fmt::format("{}-background", out.level_name);
+      auto tie_path = obj_path / "tie";
+      auto tie_proto_path = tie_path / "protos";
+      file_util::create_dir_if_needed(obj_path);
+      file_util::create_dir_if_needed(tie_path);
+      file_util::create_dir_if_needed(tie_proto_path);
+      tie_tree_info["protos"] = nlohmann::json::array();
+      for (auto& proto : info) {
+        if (proto.stiffness == 0)
+          continue;
+        nlohmann::json proto_json;
+        auto data = debug_dump_proto_to_obj(proto, out, tex_db, version);
+        file_util::write_text_file(tie_proto_path / fmt::format("{}.obj", proto.name), data);
+        export_frag_lut_texture(proto, tie_proto_path);
+        proto_json["name"] = proto.name;
+        proto_json["flag"] = proto.proto_flag;
+        proto_json["stiffness"] = proto.stiffness;
+        proto_json["instances"] = nlohmann::json::array();
+        for (auto& inst : proto.instances) {
+          nlohmann::json inst_json;
+          inst_json["bsphere"] = vectorm_tie_json(inst.bsphere);
+          inst_json["prototype-index"] = inst.prototype_idx;
+          inst_json["wind-index"] = inst.wind_index;
+          inst_json["mat"] = to_tie_json_matrix(inst.mat);
+          proto_json["instances"].push_back(inst_json);
+        }
+        //Seems to be the same for all instance frage per proto, why not in proto info?
+        proto_json["color-index-offset-in-big-palette"] =
+            proto.instances[0].frags[0].color_index_offset_in_big_palette;
+        proto_json["frag-count"] = proto.instances[0].frags.size();
+        tie_tree_info["protos"].push_back(proto_json);
+      }
+
+      //file_util::write_text_file(obj_path / fmt::format("{}_info.json", debug_name),
+      //                           tie_tree_info.dump(2));
+
+      std::string allTIE = dump_full_to_obj(info, out, tex_db, version);
+      std::string idx = debug_name.substr(debug_name.find_first_of('-') + 1, 1);
+      file_util::write_text_file(tie_path / fmt::format("tie-{}.obj", idx), allTIE);
+    }
 
     // remap vis indices and merge
     for (auto& draw : this_tree.static_draws) {
@@ -2855,5 +3351,6 @@ void extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
     this_tree.colors = pack_big_palette(full_palette);
     out.tie_trees[geo].push_back(std::move(this_tree));
   }
+  return tie_tree_info;
 }
 }  // namespace decompiler

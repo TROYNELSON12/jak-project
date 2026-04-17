@@ -683,6 +683,26 @@ struct TFragVertexData {
   // pos.w += fog.w
 
   // unk *= q
+
+  bool operator==(const TFragVertexData& other) const {
+    return pre_cam_trans_pos.x() == other.pre_cam_trans_pos.x() &&
+           pre_cam_trans_pos.y() == other.pre_cam_trans_pos.y() &&
+           pre_cam_trans_pos.z() == other.pre_cam_trans_pos.z() &&
+           stq.x() == other.stq.x() &&
+           stq.y() == other.stq.y() &&
+           rgba == other.rgba;
+  }
+
+  struct hash {
+    std::size_t operator()(const TFragVertexData& x) const {
+      return std::hash<float>()(x.pre_cam_trans_pos.x()) ^
+             std::hash<float>()(x.pre_cam_trans_pos.y()) ^
+             std::hash<float>()(x.pre_cam_trans_pos.z()) ^
+             std::hash<float>()(x.stq.x()) ^
+             std::hash<float>()(x.stq.y()) ^
+             std::hash<u16>()(x.rgba);
+    }
+  };
 };
 
 struct TFragDraw {
@@ -1685,59 +1705,6 @@ end:
   return all_draws;
 }
 
-std::string debug_dump_to_obj(const std::vector<TFragDraw>& draws) {
-  std::vector<Vector4f> verts;
-  std::vector<math::Vector<float, 2>> tcs;
-  std::vector<math::Vector<int, 3>> faces;
-
-  for (auto& draw : draws) {
-    // add verts...
-    ASSERT(draw.verts.size() >= 3);
-
-    int vert_idx = 0;
-
-    int vtx_idx_queue[3];
-
-    int q_idx = 0;
-    int startup = 0;
-    while (vert_idx < (int)draw.verts.size()) {
-      verts.push_back(draw.verts.at(vert_idx).pre_cam_trans_pos / 65536);
-      tcs.push_back(
-          math::Vector<float, 2>{draw.verts.at(vert_idx).stq.x(), draw.verts.at(vert_idx).stq.y()});
-      vert_idx++;
-      vtx_idx_queue[q_idx++] = verts.size();
-
-      // wrap the index
-      if (q_idx == 3) {
-        q_idx = 0;
-      }
-
-      // bump the startup
-      if (startup < 3) {
-        startup++;
-      }
-
-      if (startup >= 3) {
-        faces.push_back(math::Vector<int, 3>{vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
-      }
-    }
-  }
-
-  std::string result;
-  for (auto& vert : verts) {
-    result += fmt::format("v {} {} {}\n", vert.x(), vert.y(), vert.z());
-  }
-  for (auto& tc : tcs) {
-    result += fmt::format("vt {} {}\n", tc.x(), tc.y());
-  }
-  for (auto& face : faces) {
-    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x(), face.x(), face.y(), face.y(), face.z(),
-                          face.z());
-  }
-
-  return result;
-}
-
 void update_mode_from_alpha1(u64 val, DrawMode& mode) {
   GsAlpha reg(val);
   if (reg.a_mode() == GsAlpha::BlendMode::SOURCE && reg.b_mode() == GsAlpha::BlendMode::DEST &&
@@ -2079,6 +2046,109 @@ s32 find_or_add_texture_to_level(u32 combo_tex_id,
   return tfrag3_tex_id;
 }
 
+int get_or_add_vertex(const TFragVertexData& v,
+                      std::vector<TFragVertexData>& unique_verts,
+                      std::unordered_map<TFragVertexData, int, TFragVertexData::hash>& lookup) {
+  auto it = lookup.find(v);
+  if (it != lookup.end())
+    return it->second;
+
+  int idx = unique_verts.size();
+  unique_verts.push_back(v);
+  lookup[v] = idx;
+  return idx;
+}
+
+std::string debug_dump_to_obj(const std::vector<TFragDraw>& draws,
+                              std::vector<tfrag3::Texture>& texture_pool,
+                              const TextureDB& tdb,
+                              const std::vector<std::pair<int, int>>& expected_missing_textures,
+                              const std::string& level_name) {
+  //std::vector<Vector4f> verts;
+  //std::vector<math::Vector<float, 2>> txcrds;
+  //std::vector<float> tods;
+
+  std::vector<TFragVertexData> unique_verts;
+  std::unordered_map<TFragVertexData, int, TFragVertexData::hash> lookup;
+
+  struct MatKey {
+    u32 tex;
+    u32 mode;
+
+    bool operator==(const MatKey& o) const { return tex == o.tex && mode == o.mode; }
+  };
+
+  struct MatKeyHash {
+    size_t operator()(const MatKey& k) const { return (size_t(k.tex) << 32) ^ size_t(k.mode); }
+  };
+
+  std::unordered_map<MatKey, std::vector<math::Vector<int, 3>>, MatKeyHash> grouped_faces;
+
+  for (auto& draw : draws) {
+    u32 tex_combo = (((u32)draw.tpage) << 16) | draw.tex_in_page;
+    s32 tfrag3_tex_id = find_or_add_texture_to_level(tex_combo, texture_pool, tdb,
+                                                     expected_missing_textures, level_name);
+    MatKey key{tfrag3_tex_id, draw.mode.as_int()};
+
+    ASSERT(draw.verts.size() >= 3);
+
+    int vert_idx = 0;
+    int vtx_idx_queue[3];
+    int q_idx = 0;
+    int startup = 0;
+
+    while (vert_idx < (int)draw.verts.size()) {
+      TFragVertexData v;
+      v.pre_cam_trans_pos = draw.verts[vert_idx].pre_cam_trans_pos / 4096;
+      v.stq = draw.verts[vert_idx].stq;
+      v.rgba = draw.verts[vert_idx].rgba / 4;
+
+      int idx = get_or_add_vertex(v, unique_verts, lookup);
+
+      idx++;
+      vtx_idx_queue[q_idx++] = idx;
+
+      if (q_idx == 3)
+        q_idx = 0;
+
+      if (startup < 3)
+        startup++;
+
+      if (startup >= 3) {
+        grouped_faces[key].push_back({vtx_idx_queue[0], vtx_idx_queue[1], vtx_idx_queue[2]});
+      }
+
+      vert_idx++;
+    }
+  }
+
+  std::string result;
+  for (auto& v : unique_verts) {
+    result += fmt::format("v {} {} {}\n",
+                          v.pre_cam_trans_pos.x(),
+                          v.pre_cam_trans_pos.y(),
+                          v.pre_cam_trans_pos.z());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vt {} {}\n",
+                          v.stq.x(),
+                          v.stq.y());
+  }
+  for (auto& v : unique_verts) {
+    result += fmt::format("vp {}\n", v.rgba);
+  }
+
+  for (auto& [key, face_list] : grouped_faces) {
+    result += fmt::format("d texture:{} drawmode:{}\n", key.tex, key.mode);
+
+    for (auto& f : face_list) {
+      result += fmt::format("f {} {} {}\n", f.x(), f.y(), f.z());
+    }
+  }
+
+  return result;
+}
+
 void make_tfrag3_data(std::map<u32, std::vector<GroupedDraw>>& draws,
                       tfrag3::TfragTree& tree_out,
                       std::vector<tfrag3::PreloadedVertex>& vertices,
@@ -2147,7 +2217,8 @@ void emulate_tfrags(int geom,
                     const std::vector<std::pair<int, int>>& expected_missing_textures,
                     bool dump_level,
                     const std::string& level_name,
-                    bool disable_alpha_test_in_normal) {
+                    bool disable_alpha_test_in_normal,
+                    GameVersion version) {
   TFragExtractStats stats;
 
   std::vector<u8> vu_mem;
@@ -2169,12 +2240,15 @@ void emulate_tfrags(int geom,
   make_tfrag3_data(groups, tree_out, vertices, level_out.textures, tdb, expected_missing_textures,
                    level_name);
 
-  if (dump_level) {
-    auto debug_out = debug_dump_to_obj(all_draws);
-    auto file_path =
-        file_util::get_file_path({"debug_out", fmt::format("tfrag-{}.obj", debug_name)});
-    file_util::create_dir_if_needed_for_file(file_path);
-    file_util::write_text_file(file_path, debug_out);
+  if (dump_level && geom == 0) {
+    auto debug_out = debug_dump_to_obj(all_draws, level_out.textures, tdb,
+                                       expected_missing_textures, level_name);
+    auto obj_path = file_util::get_jak_project_dir() / "decompiler_out" /
+                    game_version_names[version] / "levels" / level_out.level_name /
+                    fmt::format("{}-background", level_out.level_name);
+    obj_path = obj_path / "tfrag";
+    file_util::create_dir_if_needed(obj_path);
+    file_util::write_text_file(obj_path / fmt::format("{}.obj", debug_name), debug_out);
   }
 }
 
@@ -2196,17 +2270,24 @@ void merge_groups(std::vector<tfrag3::StripDraw::VisGroup>& grps) {
   std::swap(result, grps);
 }
 
+constexpr const char* tfrag_tree_names[] = {"normal", "trans",        "dirt",  "ice",
+                                            "lowres", "lowres-trans", "water", "invalid"};
+
 }  // namespace
 
-void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
-                   const std::string& debug_name,
-                   const std::vector<level_tools::TextureRemap>& map,
-                   const TextureDB& tex_db,
-                   const std::vector<std::pair<int, int>>& expected_missing_textures,
-                   tfrag3::Level& out,
-                   bool dump_level,
-                   const std::string& level_name,
-                   bool disable_atest_in_normal) {
+nlohmann::json extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
+                             const std::string& debug_name,
+                             const std::vector<level_tools::TextureRemap>& map,
+                             const TextureDB& tex_db,
+                             const std::vector<std::pair<int, int>>& expected_missing_textures,
+                             tfrag3::Level& out,
+                             bool dump_level,
+                             const std::string& level_name,
+                             bool disable_atest_in_normal,
+                             GameVersion version) {
+  nlohmann::json tfrag_tree_info;
+  //tfrag_tree_info = nlohmann::json::array();
+
   // go through 3 lods(?)
   for (int geom = 0; geom < GEOM_MAX; ++geom) {
     tfrag3::TfragTree this_tree;
@@ -2227,6 +2308,8 @@ void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
     } else {
       ASSERT_MSG(false, fmt::format("unknown tfrag tree kind: {}", tree->my_type()));
     }
+
+    tfrag_tree_info["kind"] = tfrag3::tfrag_tree_names[(int)this_tree.kind];
 
     ASSERT(tree->length == (int)tree->arrays.size());
     ASSERT(tree->length > 0);
@@ -2270,7 +2353,8 @@ void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
     std::vector<tfrag3::PreloadedVertex> vertices;
     emulate_tfrags(geom, as_tfrag_array->tfragments, debug_name, map, out, this_tree, vertices,
                    tex_db, expected_missing_textures, dump_level, level_name,
-                   disable_atest_in_normal);
+                   disable_atest_in_normal,
+                   version);
     pack_tfrag_vertices(&this_tree.packed_vertices, vertices);
     extract_time_of_day(tree, this_tree);
 
@@ -2287,5 +2371,6 @@ void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
     }
     out.tfrag_trees[geom].push_back(this_tree);
   }
+  return tfrag_tree_info;
 }
 }  // namespace decompiler

@@ -185,14 +185,16 @@ void extract_pats(CollideListItem& item) {
   }
 }
 
-std::string debug_dump_to_obj(const std::vector<CollideListItem>& list) {
+std::pair<std::string, std::string> debug_dump_to_obj(const std::vector<CollideListItem>& list) {
   std::vector<math::Vector4f> verts;
   std::vector<math::Vector<u32, 3>> faces;
+  std::vector<u32> pats;
 
   for (auto& item : list) {
     u32 f_off = verts.size() + 1;
     for (auto& f : item.unpacked.faces) {
       faces.emplace_back(f.verts[0] + f_off, f.verts[1] + f_off, f.verts[2] + f_off);
+      pats.emplace_back(f.pat);
     }
     for (u32 t = 0; t < item.unpacked.vu0_buffer.size(); t++) {
       verts.push_back(item.unpacked.vu0_buffer[t] / 4096);
@@ -200,16 +202,20 @@ std::string debug_dump_to_obj(const std::vector<CollideListItem>& list) {
   }
 
   std::string result;
+  std::string result2;
   for (auto& vert : verts) {
     result += fmt::format("v {} {} {}\n", vert.x(), vert.y(), vert.z());
   }
 
   for (auto& face : faces) {
-    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x(), face.x(), face.y(), face.y(), face.z(),
-                          face.z());
+    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x(), face.x(), face.y(), face.y(), face.z(), face.z());
   }
 
-  return result;
+  for (auto& pat : pats) {
+    result2 += fmt::format("{}\n", pat);
+  }
+
+  return std::make_pair(result, result2);
 }
 
 void set_vertices_for_tri(tfrag3::CollisionMesh::Vertex* out, const math::Vector4f* in) {
@@ -263,9 +269,13 @@ void extract_collide_frags(const level_tools::DrawableTreeCollideFragment* tree,
     auto debug_out = debug_dump_to_obj(all_frags);
     auto file_path =
         file_util::get_file_path({fmt::format("decompiler_out/{}/collision", config.game_name),
-                                  fmt::format("collide-{}.obj", debug_name)});
+                                  fmt::format("{}-collide.obj", debug_name)});
+    auto file_path2 =
+        file_util::get_file_path({fmt::format("decompiler_out/{}/collision", config.game_name),
+                                  fmt::format("{}-pat.txt", debug_name)});
     file_util::create_dir_if_needed_for_file(file_path);
-    file_util::write_text_file(file_path, debug_out);
+    file_util::write_text_file(file_path, debug_out.first);
+    file_util::write_text_file(file_path2, debug_out.second);
   }
 
   for (auto& item : all_frags) {

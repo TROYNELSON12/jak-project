@@ -10,6 +10,8 @@
 
 #include "third-party/tiny_gltf/tiny_gltf.h"
 
+#include "third-party/stb_image/stb_image_write.h"
+
 #include "common/log/log.h"
 
 namespace {
@@ -98,6 +100,46 @@ void unstrip_tie_wind(std::vector<u32>& unstripped,
       }
       counts.push_back(unstripped.size() - starts.back());
       grp_offset += grp.num;
+    }
+  }
+}
+
+/*!
+ * Remap indices from unpacked shrub vertices to proto vertices.
+ * Also track which instance group each index came from.
+ * unpacked_idx -> proto_idx mapping based on instance_groups.
+ */
+void remap_shrub_indices_to_proto(const std::vector<u32>& unpacked_indices,
+                                   const std::vector<tfrag3::PackedShrubVertices::InstanceGroup>& groups,
+                                   std::vector<u32>& proto_indices,
+                                   std::vector<u32>& index_to_group_id) {
+  proto_indices.reserve(unpacked_indices.size());
+  index_to_group_id.reserve(unpacked_indices.size());
+
+  // Build cumulative offset map for unpacked vertices
+  std::vector<u32> unpacked_offsets;
+  u32 offset = 0;
+  for (const auto& grp : groups) {
+    unpacked_offsets.push_back(offset);
+    offset += (grp.end_vert - grp.start_vert);
+  }
+
+  // Remap each index
+  for (u32 unpacked_idx : unpacked_indices) {
+    // Find which instance group this vertex belongs to
+    for (size_t grp_idx = 0; grp_idx < groups.size(); grp_idx++) {
+      u32 grp_start = unpacked_offsets[grp_idx];
+      u32 grp_end = (grp_idx + 1 < groups.size()) ? unpacked_offsets[grp_idx + 1]
+                                                    : offset;
+
+      if (unpacked_idx >= grp_start && unpacked_idx < grp_end) {
+        // This vertex belongs to group grp_idx
+        u32 offset_in_group = unpacked_idx - grp_start;
+        u32 proto_idx = groups[grp_idx].start_vert + offset_in_group;
+        proto_indices.push_back(proto_idx);
+        index_to_group_id.push_back(grp_idx);
+        break;
+      }
     }
   }
 }
@@ -405,12 +447,12 @@ int make_color_buffer_accessor(const std::vector<tfrag3::ShrubGpuVertex>& vertic
   std::vector<float> floats;
 
   for (size_t i = 0; i < vertices.size(); i++) {
-    for (int j = 0; j < 3; j++) {
+    for (int j = 0; j < 4; j++) {
       floats.push_back(
           ((float)shrub_tree.time_of_day_colors.read(vertices[i].color_index, time_of_day, j)) /
           255.f);
     }
-    floats.push_back(1.f);
+    //floats.push_back(1.f);
   }
   memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
 
@@ -518,19 +560,6 @@ int make_shrub_color_buffer_accessor(const std::vector<tfrag3::ShrubGpuVertex>& 
   return accessor_idx;
 }
 
-float unpack_s10(u32 num) {
-  // chop to ten bits.
-  s32 snum = static_cast<s32>(num & 0x3FF);
-
-  // flip if negative bit (10)
-  if (snum & 0x200) {
-    snum |= ~0x3FF;
-  }
-
-  float result = static_cast<float>(snum);
-  return result / 511.0f;
-}
-
 int make_normal_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& vertices,
                                 tinygltf::Model& model) {
   // first create a buffer:
@@ -541,9 +570,9 @@ int make_normal_buffer_accessor(const std::vector<tfrag3::PreloadedVertex>& vert
 
   // and fill it
   for (size_t i = 0; i < vertices.size(); i++) {
-    floats.push_back(unpack_s10(vertices[i].nor));
-    floats.push_back(unpack_s10(vertices[i].nor >> 10));
-    floats.push_back(unpack_s10(vertices[i].nor >> 20));
+    floats.push_back(vertices[i].nx);
+    floats.push_back(vertices[i].ny);
+    floats.push_back(vertices[i].nz);
   }
   memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
 
@@ -685,27 +714,22 @@ int make_tie_wind_index_buffer_view(const std::vector<tfrag3::InstancedStripDraw
   return buffer_view_idx;
 }
 
-/*!
- * Create a tinygltf buffer and buffer view for indices, and convert to gltf format.
- * The map can be used to go from slots in the old index buffer to new.
- */
-int make_shrub_index_buffer_view(const std::vector<u32>& indices,
-                                 const std::vector<tfrag3::ShrubDraw>& draws,
-                                 tinygltf::Model& model,
-                                 std::vector<u32>& draw_to_start,
-                                 std::vector<u32>& draw_to_count) {
+int make_shrub_index_buffer_accessor(const std::vector<u32>& indices,
+                                      const std::vector<tfrag3::ShrubDraw>& draws,
+                                      tinygltf::Model& model,
+                                      std::vector<u32>& draw_to_start,
+                                      std::vector<u32>& draw_to_count) {
+  // Build unstripped indices for each draw
   std::vector<u32> unstripped;
   unstrip_shrub_draws(indices, unstripped, draw_to_start, draw_to_count, draws);
 
-  // first create a buffer:
+  // Create a buffer for all indices
   int buffer_idx = (int)model.buffers.size();
   auto& buffer = model.buffers.emplace_back();
   buffer.data.resize(sizeof(u32) * unstripped.size());
-
-  // and fill it
   memcpy(buffer.data.data(), unstripped.data(), buffer.data.size());
 
-  // create a view of this buffer
+  // Create a buffer view
   int buffer_view_idx = (int)model.bufferViews.size();
   auto& buffer_view = model.bufferViews.emplace_back();
   buffer_view.buffer = buffer_idx;
@@ -713,100 +737,7 @@ int make_shrub_index_buffer_view(const std::vector<u32>& indices,
   buffer_view.byteLength = buffer.data.size();
   buffer_view.byteStride = 0;  // tightly packed
   buffer_view.target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
-  return buffer_view_idx;
-}
 
-int make_shrub_index_buffer_view_grouped(const std::vector<u32>& indices,
-                                         const std::vector<tfrag3::ShrubDraw>& draws,
-                                         const std::vector<tfrag3::PackedShrubVertices::InstanceGroup>& groups,
-                                         tinygltf::Model& model,
-                                         std::vector<std::vector<u32>>& draw_to_starts,
-                                         std::vector<std::vector<u32>>& draw_to_counts,
-                                         std::vector<std::vector<u32>>& draw_to_group_ids) {
-  // Build group offsets in the expanded (unpacked) vertex ordering.
-  std::vector<u32> group_offsets;
-  group_offsets.reserve(groups.size());
-  u32 running = 0;
-  for (const auto& g : groups) {
-    group_offsets.push_back(running);
-    u32 size = g.end_vert - g.start_vert;
-    running += size;
-  }
-
-  auto find_group = [&](u32 vtx_idx) -> int {
-    // binary search the group_offsets to find greatest offset <= vtx_idx
-    int lo = 0;
-    int hi = (int)group_offsets.size() - 1;
-    if (group_offsets.empty()) return -1;
-    if (vtx_idx < group_offsets[0]) return -1;
-    while (lo <= hi) {
-      int mid = (lo + hi) / 2;
-      u32 off = group_offsets[mid];
-      u32 next_off = (mid + 1 < (int)group_offsets.size()) ? group_offsets[mid + 1] : running;
-      if (vtx_idx >= off && vtx_idx < next_off) return mid;
-      if (vtx_idx < off) hi = mid - 1;
-      else lo = mid + 1;
-    }
-    return -1;
-  };
-
-  std::vector<u32> unstripped;
-
-  // For each draw, collect triangles per group, then append them so they are grouped
-  // (draw -> group -> triangles). This mirrors the tie wind exporter behavior.
-  draw_to_starts.resize(draws.size());
-  draw_to_counts.resize(draws.size());
-  draw_to_group_ids.resize(draws.size());
-
-  for (size_t d = 0; d < draws.size(); d++) {
-    const auto& draw = draws[d];
-
-    // temporary buckets per group (only push for groups that get tris)
-    std::vector<std::vector<u32>> per_group(groups.size());
-
-    // iterate over the raw index stream for this draw (strip-format)
-    for (size_t i = 2; i < draw.num_indices; i++) {
-      int idx = (int)(i + draw.first_index_index);
-      u32 a = indices[idx];
-      u32 b = indices[idx - 1];
-      u32 c = indices[idx - 2];
-      if (a == UINT32_MAX || b == UINT32_MAX || c == UINT32_MAX) {
-        continue;
-      }
-      int ga = find_group(a);
-      int gb = find_group(b);
-      int gc = find_group(c);
-      // triangles should all come from same group. If not, put them in group 0 as fallback.
-      int gid = (ga == gb && gb == gc) ? ga : (ga >= 0 ? ga : (gb >= 0 ? gb : gc));
-      if (gid < 0) continue;
-      per_group[gid].push_back(a);
-      per_group[gid].push_back(b);
-      per_group[gid].push_back(c);
-    }
-
-    // now append groups that have data into the main unstripped buffer, record starts/counts
-    for (size_t g = 0; g < per_group.size(); g++) {
-      if (per_group[g].empty()) continue;
-      draw_to_group_ids[d].push_back((u32)g);
-      draw_to_starts[d].push_back(unstripped.size());
-      draw_to_counts[d].push_back(per_group[g].size());
-      unstripped.insert(unstripped.end(), per_group[g].begin(), per_group[g].end());
-    }
-  }
-
-  // create buffer and bufferView
-  int buffer_idx = (int)model.buffers.size();
-  auto& buffer = model.buffers.emplace_back();
-  buffer.data.resize(sizeof(u32) * unstripped.size());
-  memcpy(buffer.data.data(), unstripped.data(), buffer.data.size());
-
-  int buffer_view_idx = (int)model.bufferViews.size();
-  auto& buffer_view = model.bufferViews.emplace_back();
-  buffer_view.buffer = buffer_idx;
-  buffer_view.byteOffset = 0;
-  buffer_view.byteLength = buffer.data.size();
-  buffer_view.byteStride = 0;
-  buffer_view.target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
   return buffer_view_idx;
 }
 
@@ -933,6 +864,53 @@ int add_material_for_tex(const tfrag3::Level& level,
   return mat_idx;
 }
 
+/*!
+ * Export shrub time-of-day color texture as PNG
+ * Layout: width = color_count, height = 8 (time-of-day palettes)
+ */
+void export_shrub_tod_texture(const tfrag3::PackedTimeOfDay& tod,
+                               const fs::path& output_dir,
+                               const std::string& level_name,
+                               const std::string& ToD_name) {
+  tinygltf::Image image;
+  image.width = tod.color_count;
+  image.height = 8;
+  image.component = 4;  // RGBA
+  image.bits = 8;
+  image.pixel_type = TINYGLTF_TEXTURE_TYPE_UNSIGNED_BYTE;
+  image.image.resize(tod.color_count * 8 * 4);
+
+  // Fill texture data: [palette][color_index] layout
+  for (u32 palette = 0; palette < 8; palette++) {
+    for (u32 color_idx = 0; color_idx < tod.color_count; color_idx++) {
+      u32 pixel_idx = (palette * tod.color_count + color_idx) * 4;
+      image.image[pixel_idx + 0] = tod.read(color_idx, palette, 0);  // R
+      image.image[pixel_idx + 1] = tod.read(color_idx, palette, 1);  // G
+      image.image[pixel_idx + 2] = tod.read(color_idx, palette, 2);  // B
+      image.image[pixel_idx + 3] = tod.read(color_idx, palette, 3);  // A
+    }
+  }
+
+  // Save as PNG using stb_image_write
+  auto tod_path =
+      output_dir /
+      fmt::format("{}_{}_tod.png", level_name.substr(0, level_name.find_last_of('-')), ToD_name);
+  file_util::create_dir_if_needed_for_file(tod_path);
+  
+  int result = stbi_write_png(tod_path.string().c_str(), 
+                              image.width, image.height, 
+                              image.component, 
+                              image.image.data(), 
+                              image.width * image.component);
+  
+  if (result) {
+    lg::info("Exported shrub ToD texture: {} ({}x{} colors)", tod_path.string(), 
+             tod.color_count, 8);
+  } else {
+    lg::error("Failed to export shrub ToD texture: {}", tod_path.string());
+  }
+}
+
 const int kMaxColor = 8;
 /*!
  * Add the given tfrag data to a node under tfrag_root.
@@ -1047,6 +1025,7 @@ void add_tie(const tfrag3::Level& level,
   }
 
   if (!tie.instanced_wind_draws.empty()) {
+    return;
     std::vector<std::vector<u32>> draw_to_starts, draw_to_counts;
     int wind_index_buffer_view = make_tie_wind_index_buffer_view(tie.instanced_wind_draws, model,
                                                                  draw_to_starts, draw_to_counts);
@@ -1055,16 +1034,24 @@ void add_tie(const tfrag3::Level& level,
       const auto& wind_draw = tie.instanced_wind_draws[draw_idx];
       int mat =
           add_material_for_tex(level, model, wind_draw.tree_tex_id, tex_image_map, wind_draw.mode);
+
+      // Create a single mesh for all instances of this draw
+      int c_mesh_idx = (int)model.meshes.size();
+      auto& c_mesh = model.meshes.emplace_back();
+
       for (size_t grp_idx = 0; grp_idx < wind_draw.instance_groups.size(); grp_idx++) {
         const auto& grp = wind_draw.instance_groups[grp_idx];
+
+        u16 wind_index = tie.wind_instance_info.at(grp.instance_idx).wind_idx;
+        float stiffness = tie.wind_instance_info.at(grp.instance_idx).stiffness;
+
+        //lg::info("TIE draw {} has wind index of {} and stiffness {}", draw_idx, wind_index, stiffness);
+
         int c_node_idx = (int)model.nodes.size();
         auto& c_node = model.nodes.emplace_back();
         model.nodes[node_idx].children.push_back(c_node_idx);
-        int c_mesh_idx = (int)model.meshes.size();
-        auto& c_mesh = model.meshes.emplace_back();
         c_node.mesh = c_mesh_idx;
-        c_node.name = fmt::format("TIE_WindMesh_{}_{}_{}", index, draw_idx, grp_idx);
-        auto& prim = c_mesh.primitives.emplace_back();
+        c_node.name = fmt::format("TIE_Wind,Windex:{},Stiffness:{};", wind_index, stiffness);
 
         const auto& info = tie.wind_instance_info.at(grp.instance_idx);
         for (int i = 0; i < 4; i++) {
@@ -1074,6 +1061,7 @@ void add_tie(const tfrag3::Level& level,
           }
         }
 
+        auto& prim = c_mesh.primitives.emplace_back();
         prim.material = mat;
         prim.indices = make_index_buffer_accessor(model, draw_to_starts.at(draw_idx).at(grp_idx),
                                                   draw_to_counts.at(draw_idx).at(grp_idx),
@@ -1089,74 +1077,225 @@ void add_tie(const tfrag3::Level& level,
   }
 }
 
+//void add_shrub_old(const tfrag3::Level& level,
+//               const tfrag3::ShrubTree& shrub_in,
+//               tinygltf::Model& model,
+//               std::unordered_map<int, int>& tex_image_map,
+//               u32 index) {
+//  // copy and unpack in place
+//  tfrag3::ShrubTree shrub = shrub_in;
+//  shrub.unpackExtractor();
+//
+//  // we'll make a Node, Mesh, Primitive, then add the data to the primitive.
+//  int node_idx = (int)model.nodes.size();
+//  auto& node = model.nodes.emplace_back();
+//  model.scenes.at(0).nodes.push_back(node_idx);
+//  node.name = fmt::format("Shrub_Root_{}", index);
+//
+//
+//  int position_buffer_accessor = make_position_buffer_accessor(shrub.unpacked.vertices, model);
+//  int texture_buffer_accessor = make_tex_buffer_accessor(shrub.unpacked.vertices, model, 1.f / 4096.f);
+//  int colors[kMaxColor];
+//  for (int i = 0; i < kMaxColor; i++) {
+//    colors[i] = make_color_buffer_accessor(shrub.unpacked.vertices, model, shrub, i);
+//  }
+//  int base_color_accessor = make_shrub_color_buffer_accessor(shrub.unpacked.vertices, model);
+//
+//  std::vector<std::vector<u32>> draw_to_starts, draw_to_counts, draw_to_group_ids;
+//  int index_buffer_view = make_shrub_index_buffer_view_grouped(shrub.indices, shrub.static_draws,
+//                                                               shrub.packed_vertices.instance_groups,
+//                                                               model, draw_to_starts,
+//                                                               draw_to_counts, draw_to_group_ids);
+//
+//  for (size_t draw_idx = 0; draw_idx < shrub.static_draws.size(); draw_idx++) {
+//    const auto& draw = shrub.static_draws[draw_idx];
+//    int mat = add_material_for_tex(level, model, draw.tree_tex_id, tex_image_map, draw.mode);
+//
+//    // Create a single mesh for all instances of this draw
+//    int c_mesh_idx = (int)model.meshes.size();
+//    auto& c_mesh = model.meshes.emplace_back();
+//
+//    for (size_t local_grp = 0; local_grp < draw_to_starts[draw_idx].size(); local_grp++) {
+//      u32 start = draw_to_starts[draw_idx][local_grp];
+//      u32 count = draw_to_counts[draw_idx][local_grp];
+//      u32 group_id = draw_to_group_ids[draw_idx][local_grp];
+//
+//      u16 wind_index = shrub.packed_vertices.instance_groups.at(group_id).wind_idx;
+//      float stiffness = shrub.packed_vertices.instance_groups.at(group_id).stiffness;
+//
+//      //lg::info("Shrub draw {} group {} has wind index of {} and stiffness {}", draw_idx, group_id, wind_index, stiffness);
+//
+//      int c_node_idx = (int)model.nodes.size();
+//      auto& c_node = model.nodes.emplace_back();
+//      model.nodes[node_idx].children.push_back(c_node_idx);
+//      c_node.mesh = c_mesh_idx;
+//      ASSERT(draw.proto_idx < shrub.proto_names.size());
+//      std::string shrub_name = shrub.proto_names[draw.proto_idx];
+//      c_node.name = fmt::format("Shrub_{},Windex:{},Stiffness:{};", shrub_name.substr(0, shrub_name.find_last_of('.')), wind_index, stiffness);
+//
+//      const auto& inst_grp = shrub.packed_vertices.instance_groups.at(group_id);
+//      const auto& info = shrub.packed_vertices.matrices.at(inst_grp.matrix_idx);
+//
+//      for (int i = 0; i < 4; i++) {
+//        float scale = i == 3 ? (1.f / 4096.f) : 1.f;
+//        for (int j = 0; j < 4; j++) {
+//          c_node.matrix.push_back(scale * info[i][j]);
+//        }
+//      }
+//
+//      auto& prim = c_mesh.primitives.emplace_back();
+//      prim.material = mat;
+//      prim.indices = make_index_buffer_accessor(model, start, count, index_buffer_view);
+//      prim.attributes["POSITION"] = position_buffer_accessor;
+//      prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
+//      for (int i = 0; i < kMaxColor; i++) {
+//        prim.attributes[fmt::format("COLOR_{}", i)] = colors[i];
+//      }
+//      prim.attributes[fmt::format("COLOR_{}", kMaxColor + 0)] = base_color_accessor;
+//      prim.mode = TINYGLTF_MODE_TRIANGLES;
+//    }
+//  }
+//}
+
 void add_shrub(const tfrag3::Level& level,
                const tfrag3::ShrubTree& shrub_in,
                tinygltf::Model& model,
                std::unordered_map<int, int>& tex_image_map,
                u32 index) {
-  // copy and unpack in place
-  tfrag3::ShrubTree shrub = shrub_in;
-  shrub.unpackExtractor();
+  // Use proto vertices directly and remap indices to reference them
+  // This avoids the massive vertex duplication from unpacking
 
-  // we'll make a Node, Mesh, Primitive, then add the data to the primitive.
+  // Create root node
   int node_idx = (int)model.nodes.size();
   auto& node = model.nodes.emplace_back();
   model.scenes.at(0).nodes.push_back(node_idx);
-  node.name = fmt::format("Shrub_Tree_{}", index);
+  node.name = fmt::format("Shrub_Root_{}", index);
 
-
-  int position_buffer_accessor = make_position_buffer_accessor(shrub.unpacked.vertices, model);
-  int texture_buffer_accessor = make_tex_buffer_accessor(shrub.unpacked.vertices, model, 1.f / 4096.f);
-  int colors[kMaxColor];
-  for (int i = 0; i < kMaxColor; i++) {
-    colors[i] = make_color_buffer_accessor(shrub.unpacked.vertices, model, shrub, i);
+  // Convert proto vertices to GPU format
+  std::vector<tfrag3::ShrubGpuVertex> gpu_vertices;
+  for (const auto& proto_vtx : shrub_in.packed_vertices.vertices) {
+    auto& gpu_vtx = gpu_vertices.emplace_back();
+    gpu_vtx.x = proto_vtx.x;
+    gpu_vtx.y = proto_vtx.y;
+    gpu_vtx.z = proto_vtx.z;
+    gpu_vtx.s = proto_vtx.s;
+    gpu_vtx.t = proto_vtx.t;
+    gpu_vtx.pad0 = 0;
+    gpu_vtx.color_index = 0;
+    gpu_vtx.pad1 = 0;
+    memcpy(gpu_vtx.rgba_base, proto_vtx.rgba, 3);
+    gpu_vtx.pad2 = 0;
   }
-  int base_color_accessor = make_shrub_color_buffer_accessor(shrub.unpacked.vertices, model);
 
-  std::vector<std::vector<u32>> draw_to_starts, draw_to_counts, draw_to_group_ids;
-  int index_buffer_view = make_shrub_index_buffer_view_grouped(shrub.indices, shrub.static_draws,
-                                                               shrub.packed_vertices.instance_groups,
-                                                               model, draw_to_starts,
-                                                               draw_to_counts, draw_to_group_ids);
+  // Create buffer accessors for vertex data (using proto vertices)
+  int position_buffer_accessor = make_position_buffer_accessor(gpu_vertices, model);
+  int texture_buffer_accessor = make_tex_buffer_accessor(gpu_vertices, model, 1.f / 4096.f);
+  int colors[kMaxColor];
+  //for (int i = 0; i < kMaxColor; i++) {
+  //  colors[i] = make_color_buffer_accessor(gpu_vertices, model, shrub_in, i);
+  //}
+  int base_color_accessor = make_shrub_color_buffer_accessor(gpu_vertices, model);
 
-  for (size_t draw_idx = 0; draw_idx < shrub.static_draws.size(); draw_idx++) {
-    const auto& draw = shrub.static_draws[draw_idx];
-    int mat = add_material_for_tex(level, model, draw.tree_tex_id, tex_image_map, draw.mode);
+  // Build index buffer - unstrip the strip format indices and remap to proto vertices
+  std::vector<u32> unstripped;
+  std::vector<u32> draw_to_start_flat, draw_to_count_flat;
+  unstrip_shrub_draws(shrub_in.indices, unstripped, draw_to_start_flat, draw_to_count_flat,
+                      shrub_in.static_draws);
 
-    for (size_t local_grp = 0; local_grp < draw_to_starts[draw_idx].size(); local_grp++) {
-      u32 start = draw_to_starts[draw_idx][local_grp];
-      u32 count = draw_to_counts[draw_idx][local_grp];
-      u32 group_id = draw_to_group_ids[draw_idx][local_grp];
+  // Remap indices from unpacked vertex ordering to proto vertex indices
+  std::vector<u32> proto_indices;
+  std::vector<u32> index_to_group_id;
+  remap_shrub_indices_to_proto(unstripped, shrub_in.packed_vertices.instance_groups, proto_indices,
+                                index_to_group_id);
 
-      int c_node_idx = (int)model.nodes.size();
-      auto& c_node = model.nodes.emplace_back();
-      model.nodes[node_idx].children.push_back(c_node_idx);
-      int c_mesh_idx = (int)model.meshes.size();
-      auto& c_mesh = model.meshes.emplace_back();
-      c_node.mesh = c_mesh_idx;
-      ASSERT(draw.proto_idx < shrub.proto_names.size());
-      c_node.name = fmt::format("Shrub_{}_{}_{}", shrub.proto_names[draw.proto_idx], draw_idx, group_id);
+  // Create buffer for remapped indices
+  int buffer_idx = (int)model.buffers.size();
+  auto& buffer = model.buffers.emplace_back();
+  buffer.data.resize(sizeof(u32) * proto_indices.size());
+  memcpy(buffer.data.data(), proto_indices.data(), buffer.data.size());
 
-      const auto& inst_grp = shrub.packed_vertices.instance_groups.at(group_id);
-      const auto& info = shrub.packed_vertices.matrices.at(inst_grp.matrix_idx);
+  int buffer_view_idx = (int)model.bufferViews.size();
+  auto& buffer_view = model.bufferViews.emplace_back();
+  buffer_view.buffer = buffer_idx;
+  buffer_view.byteOffset = 0;
+  buffer_view.byteLength = buffer.data.size();
+  buffer_view.byteStride = 0;
+  buffer_view.target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
 
-      for (int i = 0; i < 4; i++) {
-        float scale = i == 3 ? (1.f / 4096.f) : 1.f;
-        for (int j = 0; j < 4; j++) {
-          c_node.matrix.push_back(scale * info[i][j]);
-        }
+  // For each static_draw (proto), create one mesh
+  std::vector<int> draw_to_mesh_idx(shrub_in.static_draws.size());
+  for (size_t draw_idx = 0; draw_idx < shrub_in.static_draws.size(); draw_idx++) {
+    const auto& draw = shrub_in.static_draws[draw_idx];
+    int material = add_material_for_tex(level, model, draw.tree_tex_id, tex_image_map, draw.mode);
+
+    int c_mesh_idx = (int)model.meshes.size();
+    draw_to_mesh_idx[draw_idx] = c_mesh_idx;  // Store the actual mesh index
+    auto& c_mesh = model.meshes.emplace_back();
+
+    // Create a single primitive for this draw with all its indices
+    auto& prim = c_mesh.primitives.emplace_back();
+    prim.material = material;
+    prim.indices = make_index_buffer_accessor(model, draw_to_start_flat[draw_idx],
+                                              draw_to_count_flat[draw_idx], buffer_view_idx);
+    prim.attributes["POSITION"] = position_buffer_accessor;
+    prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
+    //for (int i = 0; i < kMaxColor; i++) {
+    //  prim.attributes[fmt::format("COLOR_{}", i)] = colors[i];
+    //}
+    prim.attributes["COLOR_0"] = base_color_accessor;
+    prim.mode = TINYGLTF_MODE_TRIANGLES;
+  }
+
+  // Map each instance group to its first occurrence in the index_to_group_id
+  // This tells us which draw owns each instance group
+  std::vector<int> group_to_draw(shrub_in.packed_vertices.instance_groups.size(), -1);
+  for (size_t draw_idx = 0; draw_idx < shrub_in.static_draws.size(); draw_idx++) {
+    u32 start = draw_to_start_flat[draw_idx];
+    u32 count = draw_to_count_flat[draw_idx];
+    for (u32 i = start; i < start + count && i < index_to_group_id.size(); i++) {
+      u32 grp_id = index_to_group_id[i];
+      if (group_to_draw[grp_id] == -1) {
+        group_to_draw[grp_id] = draw_idx;
       }
+    }
+  }
 
-      auto& prim = c_mesh.primitives.emplace_back();
-      prim.material = mat;
-      prim.indices = make_index_buffer_accessor(model, start, count, index_buffer_view);
-      prim.attributes["POSITION"] = position_buffer_accessor;
-      prim.attributes["TEXCOORD_0"] = texture_buffer_accessor;
-      for (int i = 0; i < kMaxColor; i++) {
-        prim.attributes[fmt::format("COLOR_{}", i)] = colors[i];
+  // For each instance group, create a node with its transformation
+  for (size_t inst_grp_idx = 0; inst_grp_idx < shrub_in.packed_vertices.instance_groups.size();
+       inst_grp_idx++) {
+    const auto& inst_grp = shrub_in.packed_vertices.instance_groups.at(inst_grp_idx);
+
+    int draw_idx_for_this_group = group_to_draw[inst_grp_idx];
+    if (draw_idx_for_this_group < 0) {
+      continue;  // Skip if no draw found
+    }
+
+    int c_mesh_idx = draw_to_mesh_idx[draw_idx_for_this_group];  // Use the stored mesh index
+
+    // Create node for this instance
+    int c_node_idx = (int)model.nodes.size();
+    auto& c_node = model.nodes.emplace_back();
+    model.nodes[node_idx].children.push_back(c_node_idx);
+    c_node.mesh = c_mesh_idx;
+
+    // Set node name
+    const auto& draw = shrub_in.static_draws[draw_idx_for_this_group];
+    if (draw.proto_idx < shrub_in.proto_names.size()) {
+      std::string shrub_name = shrub_in.proto_names[draw.proto_idx];
+      c_node.name = fmt::format("Shrub_{},C:{},W:{},S:{};",
+                                shrub_name.substr(0, shrub_name.find_last_of('.')),
+                                inst_grp.color_index, inst_grp.wind_idx, inst_grp.stiffness);
+    } else {
+      c_node.name = fmt::format("Shrub_Instance_{}", inst_grp_idx);
+    }
+
+    // Apply transformation matrix
+    const auto& mat = shrub_in.packed_vertices.matrices.at(inst_grp.matrix_idx);
+    for (int i = 0; i < 4; i++) {
+      float scale = i == 3 ? (1.f / 4096.f) : 1.f;
+      for (int j = 0; j < 4; j++) {
+        c_node.matrix.push_back(scale * mat[i][j]);
       }
-      prim.attributes[fmt::format("COLOR_{}", kMaxColor + 0)] = base_color_accessor;
-      prim.mode = TINYGLTF_MODE_TRIANGLES;
     }
   }
 }
@@ -1346,6 +1485,9 @@ void add_merc(const tfrag3::Level& level,
     skin.inverseBindMatrices = make_inv_matrix_bind_poses(game_bones, model);
   }
 
+  std::vector<int> all_target_pos_accessors;
+  std::vector<int> all_target_norm_accessors;
+
   for (size_t effect_idx = 0; effect_idx < mmodel.effects.size(); effect_idx++) {
     const auto& effect = mmodel.effects[effect_idx];
     for (size_t draw_idx = 0; draw_idx < effect.all_draws.size(); draw_idx++) {
@@ -1364,6 +1506,279 @@ void add_merc(const tfrag3::Level& level,
       prim.attributes["WEIGHTS_0"] = weights_accessor;
       prim.mode = TINYGLTF_MODE_TRIANGLES;
     }
+
+    //Thus code is hot garbage.
+    continue;
+
+    // Handle BLERC (morph targets) for this effect if present
+    if (!effect.mod.blerc.int_data.empty() && !effect.mod.vertices.empty()) {
+      lg::info("BLERC: Processing effect {} with {} mod vertices, {} blerc int_data entries",
+               effect_idx, effect.mod.vertices.size(), effect.mod.blerc.int_data.size());
+
+      // BLERC (Blend-shape) data format (from Tfrag3Data.h):
+      // int data, per vertex:
+      // [tgt0_idx, tgt1_idx, ..., terminator, dest]
+      // float data, per vertex:
+      // [base, tgt0, tgt1, ...]
+
+      // final vertex position is:
+      // base + sum(tgtn * weights[tgtn_idx])
+      
+      // Map each mod vertex to a global vertex so we can output deltas in global vertex space
+      std::vector<int> mod_to_global(effect.mod.vertices.size(), -1);
+      
+      // Build a hash map of all global vertices for O(1) lookup
+      std::unordered_map<std::string, std::vector<int>> global_vert_map;
+      for (size_t gi = 0; gi < mverts.size(); gi++) {
+        const auto& gv = mverts[gi];
+        std::string key(reinterpret_cast<const char*>(&gv), sizeof(gv));
+        global_vert_map[key].push_back((int)gi);
+      }
+
+      // For each mod vertex, find its corresponding global vertex by raw byte comparison
+      // (they should be exact copies from extraction)
+      int mapped_count = 0;
+      for (size_t mi = 0; mi < effect.mod.vertices.size(); mi++) {
+        const auto& mv = effect.mod.vertices[mi];
+        std::string key(reinterpret_cast<const char*>(&mv), sizeof(mv));
+        auto it = global_vert_map.find(key);
+        if (it != global_vert_map.end() && !it->second.empty()) {
+          mod_to_global[mi] = it->second[0];
+          mapped_count++;
+        }
+      }
+      lg::info("BLERC: Mapped {} / {} mod vertices to global indices", mapped_count,
+               effect.mod.vertices.size());
+
+      // Count how many targets we have by scanning int_data
+      int num_targets = 0;
+      for (auto idx : effect.mod.blerc.int_data) {
+        if (idx == (u32)tfrag3::Blerc::kTargetIdxTerminator)
+          continue;
+        num_targets = std::max(num_targets, (int)idx + 1);
+      }
+      lg::info("BLERC: Detected {} target shapes", num_targets);
+
+      if (num_targets > 0) {
+        // We'll build position and normal deltas for each target.
+        // These are indexed by GLOBAL vertex index (same as base mesh indices)
+        // so that morph targets align with the primitive's vertex references.
+        int global_vert_count = (int)mverts.size();
+        std::vector<std::vector<float>> pos_deltas(num_targets,
+                                                   std::vector<float>(global_vert_count * 3, 0.0f));
+        std::vector<std::vector<float>> norm_deltas(num_targets,
+                                                    std::vector<float>(global_vert_count * 3, 0.0f));
+
+        // Parse BLERC int_data and float_data together.
+        // The format is per-vertex: [base_float_idx, tgt0_idx, tgt1_idx, ..., terminator, dest, ...]
+        int fidx = 0;  // index into float_data
+        int iidx = 0;  // index into int_data
+        const auto& fdata = effect.mod.blerc.float_data;
+        const auto& idata = effect.mod.blerc.int_data;
+        int processed_vertices = 0;
+        int skipped_vertices = 0;
+
+        while (iidx < (int)idata.size()) {
+          if (fidx >= (int)fdata.size()) {
+            lg::warn("BLERC: fidx {} >= fdata.size() {}", fidx, fdata.size());
+            break;
+          }
+
+          // Skip the base vertex float data (we don't need it for deltas)
+          fidx++;
+
+          // Collect all (target_index, float_data_ptr) pairs for this vertex
+          std::vector<std::pair<int, const tfrag3::BlercFloatData*>> targets;
+          while (iidx < (int)idata.size() && idata[iidx] != tfrag3::Blerc::kTargetIdxTerminator) {
+            int tidx = (int)idata[iidx++];
+            if (fidx >= (int)fdata.size()) {
+              lg::warn("BLERC: ran out of float data while reading targets");
+              break;
+            }
+            targets.emplace_back(tidx, &fdata[fidx++]);
+          }
+
+          // Expect terminator
+          if (iidx >= (int)idata.size()) {
+            lg::warn("BLERC: iidx {} >= idata.size() {}", iidx, idata.size());
+            break;
+          }
+          iidx++;  // skip terminator
+
+          // Get the destination mod vertex index
+          if (iidx >= (int)idata.size()) {
+            lg::warn("BLERC: no dest after terminator");
+            break;
+          }
+          int dest_mod_idx = (int)idata[iidx++];
+
+          // Map mod vertex to global vertex
+          if (dest_mod_idx < 0 || dest_mod_idx >= (int)effect.mod.vertices.size()) {
+            lg::warn("BLERC: invalid dest_mod_idx {} (mod has {} vertices)", dest_mod_idx,
+                     effect.mod.vertices.size());
+            skipped_vertices++;
+            continue;
+          }
+          int global_idx = mod_to_global[dest_mod_idx];
+          if (global_idx < 0) {
+            lg::warn("BLERC: mod vertex {} has no global mapping", dest_mod_idx);
+            skipped_vertices++;
+            continue;
+          }
+
+          // Store the deltas for each target at this global vertex index
+          for (auto& [tidx, tdata] : targets) {
+            if (tidx < 0 || tidx >= num_targets) {
+              lg::warn("BLERC: invalid target index {} (model has {} targets)", tidx, num_targets);
+              continue;
+            }
+            int base_idx = global_idx * 3;
+            pos_deltas[tidx][base_idx + 0] = tdata->v[0];
+            pos_deltas[tidx][base_idx + 1] = tdata->v[1];
+            pos_deltas[tidx][base_idx + 2] = tdata->v[2];
+            norm_deltas[tidx][base_idx + 0] = tdata->v[4];
+            norm_deltas[tidx][base_idx + 1] = tdata->v[5];
+            norm_deltas[tidx][base_idx + 2] = tdata->v[6];
+          }
+          processed_vertices++;
+        }
+        lg::info("BLERC: Processed {} vertices, skipped {}", processed_vertices, skipped_vertices);
+
+        std::vector<int> target_pos_accessors;
+        std::vector<int> target_norm_accessors;
+        std::vector<std::pair<size_t, size_t>> pos_target_ranges; // byte ranges per target
+        std::vector<std::pair<size_t, size_t>> norm_target_ranges; // byte ranges per target
+
+        std::vector<unsigned char> pos_buf_data;
+        std::vector<unsigned char> norm_buf_data;
+
+        const float blerc_scale = 1.0f;
+        int kept = 0;
+        for (int t = 0; t < num_targets; t++) {
+          bool all_zero = true;
+          // Check if this target has any non-zero pos or normal delta
+          for (int vi = 0; vi < global_vert_count; vi++) {
+            float px = pos_deltas[t][vi * 3 + 0];
+            float py = pos_deltas[t][vi * 3 + 1];
+            float pz = pos_deltas[t][vi * 3 + 2];
+            float nx = norm_deltas[t][vi * 3 + 0];
+            float ny = norm_deltas[t][vi * 3 + 1];
+            float nz = norm_deltas[t][vi * 3 + 2];
+            if (px != 0.0f || py != 0.0f || pz != 0.0f || nx != 0.0f || ny != 0.0f || nz != 0.0f) {
+              all_zero = false;
+              break;
+            }
+          }
+          //if (all_zero) continue;
+
+          // append position floats (scaled) to pos_buf_data
+          size_t pos_offset = pos_buf_data.size();
+          pos_target_ranges.emplace_back(pos_offset, (size_t)global_vert_count * 3 * sizeof(float));
+          pos_buf_data.resize(pos_buf_data.size() + (size_t)global_vert_count * 3 * sizeof(float));
+          float* pos_ptr = reinterpret_cast<float*>(pos_buf_data.data() + pos_offset);
+          for (int vi = 0; vi < global_vert_count; vi++) {
+            pos_ptr[vi * 3 + 0] = pos_deltas[t][vi * 3 + 0] * blerc_scale;
+            pos_ptr[vi * 3 + 1] = pos_deltas[t][vi * 3 + 1] * blerc_scale;
+            pos_ptr[vi * 3 + 2] = pos_deltas[t][vi * 3 + 2] * blerc_scale;
+          }
+
+          // append normal floats (scaled) to norm_buf_data
+          size_t norm_offset = norm_buf_data.size();
+          norm_target_ranges.emplace_back(norm_offset, (size_t)global_vert_count * 3 * sizeof(float));
+          norm_buf_data.resize(norm_buf_data.size() + (size_t)global_vert_count * 3 * sizeof(float));
+          float* norm_ptr = reinterpret_cast<float*>(norm_buf_data.data() + norm_offset);
+          for (int vi = 0; vi < global_vert_count; vi++) {
+            norm_ptr[vi * 3 + 0] = norm_deltas[t][vi * 3 + 0] * blerc_scale;
+            norm_ptr[vi * 3 + 1] = norm_deltas[t][vi * 3 + 1] * blerc_scale;
+            norm_ptr[vi * 3 + 2] = norm_deltas[t][vi * 3 + 2] * blerc_scale;
+          }
+
+          kept++;
+        }
+
+        lg::info("BLERC: Kept {} / {} non-empty targets", kept, num_targets);
+
+        // If we have any kept targets, create two buffers and create bufferViews/accessors
+        if (kept > 0) {
+          int pos_buffer_idx = (int)model.buffers.size();
+          model.buffers.emplace_back();
+          model.buffers.back().data = pos_buf_data;
+
+          int norm_buffer_idx = (int)model.buffers.size();
+          model.buffers.emplace_back();
+          model.buffers.back().data = norm_buf_data;
+
+          // Create bufferViews and accessors for each kept target in the same order we appended them
+          for (size_t ti = 0; ti < pos_target_ranges.size(); ti++) {
+            auto [pos_off, pos_len] = pos_target_ranges[ti];
+            auto [norm_off, norm_len] = norm_target_ranges[ti];
+
+            int pbv = (int)model.bufferViews.size();
+            model.bufferViews.emplace_back();
+            auto& pbview = model.bufferViews.back();
+            pbview.buffer = pos_buffer_idx;
+            pbview.byteOffset = (int)pos_off;
+            pbview.byteLength = (int)pos_len;
+            pbview.byteStride = 0;
+            pbview.target = TINYGLTF_TARGET_ARRAY_BUFFER;
+
+            int pacc = (int)model.accessors.size();
+            model.accessors.emplace_back();
+            auto& paccessor = model.accessors.back();
+            paccessor.bufferView = pbv;
+            paccessor.byteOffset = 0;
+            paccessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+            paccessor.count = global_vert_count;  // MUST match base mesh vertex count
+            paccessor.type = TINYGLTF_TYPE_VEC3;
+            target_pos_accessors.push_back(pacc);
+
+            int nbv = (int)model.bufferViews.size();
+            model.bufferViews.emplace_back();
+            auto& nbview = model.bufferViews.back();
+            nbview.buffer = norm_buffer_idx;
+            nbview.byteOffset = (int)norm_off;
+            nbview.byteLength = (int)norm_len;
+            nbview.byteStride = 0;
+            nbview.target = TINYGLTF_TARGET_ARRAY_BUFFER;
+
+            int nacc = (int)model.accessors.size();
+            model.accessors.emplace_back();
+            auto& naccessor = model.accessors.back();
+            naccessor.bufferView = nbv;
+            naccessor.byteOffset = 0;
+            naccessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+            naccessor.count = global_vert_count;  // MUST match base mesh vertex count
+            naccessor.type = TINYGLTF_TYPE_VEC3;
+            target_norm_accessors.push_back(nacc);
+          }
+        }
+
+        for (int t = 0; t < (int)target_pos_accessors.size(); t++) {
+          all_target_pos_accessors.push_back(target_pos_accessors[t]);
+          all_target_norm_accessors.push_back(target_norm_accessors[t]);
+        }
+        lg::info("BLERC: Appended {} targets for effect {} (total now {})",
+                 target_pos_accessors.size(), effect_idx, all_target_pos_accessors.size());
+      }
+    }
+  }
+
+  if (!all_target_pos_accessors.empty()) {
+    lg::info("BLERC: Attaching combined {} targets to {} primitives",
+             all_target_pos_accessors.size(), mesh.primitives.size());
+    for (size_t pi = 0; pi < mesh.primitives.size(); pi++) {
+      auto& prim = mesh.primitives[pi];
+      for (size_t t = 0; t < all_target_pos_accessors.size(); t++) {
+        std::map<std::string, int> tgt;
+        tgt["POSITION"] = all_target_pos_accessors[t];
+        tgt["NORMAL"] = all_target_norm_accessors[t];
+        prim.targets.push_back(tgt);
+      }
+      lg::info("BLERC: Primitive {} now has {} target shapes", pi, prim.targets.size());
+    }
+
+    mesh.weights = std::vector<double>(all_target_pos_accessors.size(), 0.0);
+    lg::info("BLERC: Set mesh.weights to {} entries", mesh.weights.size());
   }
 }
 
@@ -1393,16 +1808,22 @@ void save_level_background_as_gltf(const tfrag3::Level& level, const fs::path& g
   for (u32 i = 0; i < level.tfrag_trees.at(0).size(); i++) {
     const auto& tfrag = level.tfrag_trees.at(0).at(i);
     add_tfrag(level, tfrag, model, tex_image_map, i);
+    export_shrub_tod_texture(tfrag.colors, glb_file.parent_path(),
+                             glb_file.stem().string(), fmt::format("tfrag{}", i));
   }
 
   for (u32 i = 0; i < level.tie_trees.at(0).size(); i++) {
     const auto& tie = level.tie_trees.at(0).at(i);
     add_tie(level, tie, model, tex_image_map, i);
+    export_shrub_tod_texture(tie.colors, glb_file.parent_path(),
+                             glb_file.stem().string(), fmt::format("tie{}", i));
   }
 
   for (u32 i = 0; i < level.shrub_trees.size(); i++) {
     const auto& shrub = level.shrub_trees.at(i);
     add_shrub(level, shrub, model, tex_image_map, i);
+    export_shrub_tod_texture(shrub.time_of_day_colors, glb_file.parent_path(),
+                             glb_file.stem().string(), fmt::format("shrub{}", i));
   }
 
   model.asset.generator = "opengoal";
