@@ -5,6 +5,8 @@
 ;; name in dgo: game-save
 ;; dgos: GAME
 
+(define-extern mark-speedrun-started (function none))
+
 ;; +++game-save-elt
 (defenum game-save-elt
   :type uint16
@@ -112,7 +114,7 @@
 
 ;; DECOMP BEGINS
 
-(defun-debug game-save-elt->string ((arg0 game-save-elt))
+(defun game-save-elt->string ((arg0 game-save-elt))
   (case arg0
     (((game-save-elt video-mode))
      "video-mode"
@@ -1788,6 +1790,9 @@
             )
       )
     )
+  ;; og:preserve-this make sure loading a save doesn't reset speedrun state
+  (when (and (-> *pc-settings* speedrunner-mode?) (zero? (-> arg0 new-game)))
+    (mark-speedrun-started))
   (when (nonzero? (-> arg0 new-game))
     (case (-> arg0 new-game)
       ((2)

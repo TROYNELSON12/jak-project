@@ -12,7 +12,7 @@
 
 (kmemopen global "progress-data")
 
-(define *progress-stack* (the-as (pointer uint8) (malloc 'global #x3800)))
+(define *progress-stack* (the-as (pointer uint8) (malloc 'global DPROCESS_STACK_SIZE)))
 
 (define *progress-process* (the-as (pointer progress) #f))
 
@@ -228,7 +228,12 @@
 
 (defun progress-intro-start ()
   (set! (-> *game-info* mode) 'play)
-  (initialize! *game-info* 'game (the-as game-save #f) "intro-start" (the-as resetter-spec #f))
+  ;; og:preserve-this start speedrun from title screen
+  (cond
+    ((= (-> *pc-settings* speedrunner-mode?) #t)
+      (start-run! *speedrun-info*))
+    (else
+      (initialize! *game-info* 'game (the-as game-save #f) "intro-start" (the-as resetter-spec #f))))
   (set-master-mode 'game)
   0
   )
@@ -493,7 +498,7 @@
         (set-menu-mode *blit-displays-work* #t)
         )
       (set! *progress-process*
-            (process-spawn progress arg1 :name "progress" :to arg0 :stack (&-> *progress-stack* 14336))
+            (process-spawn progress arg1 :name "progress" :to arg0 :stack (&-> *progress-stack* DPROCESS_STACK_SIZE))
             )
       (set-master-mode 'progress)
       )
