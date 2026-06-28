@@ -105,7 +105,7 @@
     (.mov a0-1 vf10)
     (.pcgtw a0-2 0 a0-1)
     (.ppach a0-3 (the-as uint128 0) a0-2)
-    (zero? (logand (the-as int v1-3) (the-as int a0-3)))))
+    (not (logtest? (the-as int v1-3) (the-as int a0-3)))))
 
 (defun vis-cull ((id int))
   "Is this thing visible? By draw-node id."
@@ -185,11 +185,11 @@
                 ((drawable-tree-instance-shrub)
                  (let ((s2-0 (-> (the-as drawable-tree-instance-shrub v1-7) info prototype-inline-array-shrub)))
                    (dotimes (s1-0 (-> s2-0 length))
-                     (if (string= arg0 (the-as string (-> s2-0 data s1-0 name))) (return (-> s2-0 data s1-0))))))
+                     (if (string= arg0 (-> s2-0 data s1-0 name)) (return (-> s2-0 data s1-0))))))
                 ((drawable-tree-instance-tie)
                  (let ((s2-1 (-> (the-as drawable-tree-instance-tie v1-7) prototypes prototype-array-tie)))
                    (dotimes (s1-1 (-> s2-1 length))
-                     (if (string= arg0 (the-as string (-> s2-1 array-data s1-1 name))) (return (-> s2-1 array-data s1-1)))))))))))))
+                     (if (string= arg0 (-> s2-1 array-data s1-1 name)) (return (-> s2-1 array-data s1-1)))))))))))))
   (the-as prototype-bucket #f))
 
 (defun-debug find-instance-by-index ((arg0 type) (arg1 int) (arg2 bsp-header))
@@ -224,7 +224,7 @@
      (set! (-> arg0 dists z) (+ (-> arg0 dists x) (* 0.33333334 (- (-> arg0 dists w) (-> arg0 dists x)))))
      (set! (-> arg0 rdists x) (/ 1.0 (- (-> arg0 dists z) (-> arg0 dists x))))))
   (set! (-> arg0 rdists z) (/ 1.0 (- (-> arg0 dists w) (-> arg0 dists z))))
-  (set! (-> arg0 dists y) (* 0.5 (-> arg0 dists x)))
+  (set! (-> arg0 dists y) (/ (-> arg0 dists x) 2))
   (set! (-> arg0 rdists y) (/ 1.0 (-> arg0 dists y)))
   arg0)
 
@@ -419,6 +419,7 @@
 |#
 
 (defun dma-add-process-drawable ((arg0 process-drawable) (arg1 draw-control) (arg2 symbol) (arg3 dma-buffer))
+  (local-vars (v1-37 float))
   (local-vars (v1-37 float))
   (rlet ((acc :class vf)
          (Q :class vf)
@@ -636,7 +637,7 @@
 
 (defun dma-add-process-drawable-hud ((arg0 process-drawable) (arg1 draw-control) (arg2 symbol) (arg3 dma-buffer))
   (logclear! (-> arg1 status) (draw-status was-drawn))
-  (when (zero? (logand (-> arg1 status) (draw-status hidden no-anim no-skeleton-update)))
+  (when (not (logtest? (-> arg1 status) (draw-status hidden no-anim no-skeleton-update)))
     (let ((v1-6 (the-as vu-lights (+ 64 (scratchpad-object int))))
           (a0-3 *hud-lights*))
       (set! (-> v1-6 direction 0 quad) (-> a0-3 direction 0 quad))
@@ -760,6 +761,7 @@
           (if (= (-> s5-0 status) 'active) (print-mem-usage (compute-memory-usage s5-0 #f) s5-0 *stdcon*)))))
     (reset! *dma-mem-usage*))
   ;; todo shrub matrix
+  ; (shrub-make-perspective-matrix (-> *math-camera* shrub-mat))
   ;; initialize dma buckets that are generic sinks.
   ;; other renderers may output to these, so do them first.
   (generic-init-buffers)
@@ -942,25 +944,7 @@
     (let* ((a3-4 t0-0)
            (t1-2 (the-as object (-> a3-4 base))))
       (set! (-> (the-as gs-gif-tag t1-2) tag) (new 'static 'gif-tag64 :nloop #x1 :eop #x1 :nreg #x2))
-      (set! (-> (the-as gs-gif-tag t1-2) regs)
-            (new 'static
-                 'gif-tag-regs
-                 :regs0 (gif-reg-id a+d)
-                 :regs1 (gif-reg-id a+d)
-                 :regs2 (gif-reg-id a+d)
-                 :regs3 (gif-reg-id a+d)
-                 :regs4 (gif-reg-id a+d)
-                 :regs5 (gif-reg-id a+d)
-                 :regs6 (gif-reg-id a+d)
-                 :regs7 (gif-reg-id a+d)
-                 :regs8 (gif-reg-id a+d)
-                 :regs9 (gif-reg-id a+d)
-                 :regs10 (gif-reg-id a+d)
-                 :regs11 (gif-reg-id a+d)
-                 :regs12 (gif-reg-id a+d)
-                 :regs13 (gif-reg-id a+d)
-                 :regs14 (gif-reg-id a+d)
-                 :regs15 (gif-reg-id a+d)))
+      (set! (-> (the-as gs-gif-tag t1-2) regs) GIF_REGS_ALL_AD)
       (set! (-> a3-4 base) (&+ (the-as pointer t1-2) 16)))
     (let* ((a3-5 t0-0)
            (t1-4 (-> a3-5 base)))

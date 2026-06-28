@@ -61,6 +61,7 @@ add_library(
         level_extractor/extract_hfrag.cpp
         level_extractor/extract_joint_anim.cpp
         level_extractor/extract_joint_group.cpp
+        level_extractor/extract_anim.cpp
         level_extractor/extract_level.cpp
         level_extractor/extract_merc.cpp
         level_extractor/extract_tfrag.cpp
@@ -101,7 +102,7 @@ target_link_libraries(decomp
         stb_image
         xdelta3
         tiny_gltf
-        )
+)
 
 add_executable(decompiler
         main.cpp "level_extractor/fr3_to_obj.cpp" "level_extractor/fr3_to_obj.h")

@@ -16,45 +16,94 @@ struct Joint {
   math::Matrix4f bind_pose_T_w;
 };
 
-struct MercEyeAnimFrame {
-  s8 pupil_trans_x;
-  s8 pupil_trans_y;
-  s8 blink;
-  s8 pad0 = 0;  // goal layout has iris-scale at byte 4
-  s8 iris_scale;
-  s8 pupil_scale;
-  s8 lid_scale;
-  s8 pad1 = 0;  // pack-me to 8 bytes, matches overlayed uint64
+struct UncompressedSingleJointAnim {
+  std::vector<math::Vector3f> trans_frames;
+  std::vector<math::Vector3f> scale_frames;
+  std::vector<math::Vector4f> quat_frames;
 };
 
-struct MercEyeAnimBlock {
-  short max_frame;
-  std::vector<MercEyeAnimFrame> data;
-};
-
-struct JointAnim {
+struct UncompressedJointAnim {
   std::string name;
-  short number;
-  short length;
+  std::vector<UncompressedSingleJointAnim> joints;
+  float framerate = 30;
+  int frames = 0;
+  std::vector<u8> blend_shape_data;
 };
 
-struct JointAnimCompressed : JointAnim {
-  //std::vector<u32> data; //possibly not needed?
+struct CompressedMatrixMetadata {
+  bool is_animated[2];
 };
 
-struct JointAnimCompressedHdr {
+struct CompressedFrame {
+  std::vector<u16> data16;
+  std::vector<u32> data32;
+  std::vector<u64> data64;
+
+  int size_bytes() const { return data16.size() * 2 + data32.size() * 4 + data64.size() * 8; }
+};
+
+struct CompressedJointMetadata {
+  bool animated_trans = false;
+  bool animated_quat = false;
+  bool animated_scale = false;
+  bool big_trans_mode = false;
+};
+
+struct CompressedAnim {
+  std::string name;
+  CompressedFrame fixed;
+  std::vector<CompressedFrame> frames;
+  bool matrix_animated[2] = {false, false};
+  std::vector<CompressedJointMetadata> joint_metadata;
+  float framerate = 60;
+};
+
+struct JointAnimCompressedHDR {
   u32 control_bits[14];
   u32 num_joints;
   u32 matrix_bits;
+
+  JointAnimCompressedHDR() {
+    for (auto& bit : control_bits) {
+      bit = 0;
+    }
+    num_joints = 1;
+    matrix_bits = 0;
+  }
 };
 
 struct JointAnimCompressedFixed {
-  JointAnimCompressedHdr hdr;
+  JointAnimCompressedHDR hdr;
   u32 offset_64;
   u32 offset_32;
   u32 offset_16;
   u32 reserved;
   math::Vector4f data[133];
+  int num_data_qw_used = 0;
+  bool mat[2] = {false, false};
+  math::Matrix4f mats[2] = {math::Matrix4f::zero(), math::Matrix4f::zero()};
+  u64 data64_size;
+  u32 data32_size;
+  u16 data16_size;
+  std::vector<u64> data64;
+  std::vector<u32> data32;
+  std::vector<u16> data16;
+
+  JointAnimCompressedFixed() {
+    offset_64 = 0;
+    offset_32 = 0;
+    offset_16 = 0;
+    reserved = 0;
+    data[0] = math::Vector4f(1.0f, 0.0f, 0.0f, 0.0f);
+    data[1] = math::Vector4f(0.0f, 1.0f, 0.0f, 0.0f);
+    data[2] = math::Vector4f(0.0f, 0.0f, 1.0f, 0.0f);
+    data[3] = math::Vector4f(0.0f, 0.0f, 0.0f, 1.0f);
+    data[4] = math::Vector4f(1.0f, 0.0f, 0.0f, 0.0f);
+    data[5] = math::Vector4f(0.0f, 1.0f, 0.0f, 0.0f);
+    data[6] = math::Vector4f(0.0f, 0.0f, 1.0f, 0.0f);
+    data[7] = math::Vector4f(0.0f, 0.0f, 0.0f, 1.0f);
+    num_data_qw_used = 8;
+  }
 };
 
 struct JointAnimCompressedFrame {
@@ -62,7 +111,23 @@ struct JointAnimCompressedFrame {
   u32 offset_32;
   u32 offset_16;
   u32 reserved;
-  math::Vector4f data[133];
+  // math::Vector4f data[133];
+  u32 num_data_qw_used = 0;
+  bool mat[2] = {false, false};
+  math::Matrix4f mats[2] = {math::Matrix4f::zero(), math::Matrix4f::zero()};
+  u64 data64_size;
+  u32 data32_size;
+  u16 data16_size;
+  std::vector<u64> data64;
+  std::vector<u32> data32;
+  std::vector<u16> data16;
+
+  JointAnimCompressedFrame() {
+    offset_64 = 0;
+    offset_32 = 0;
+    offset_16 = 0;
+    reserved = 0;
+  }
 };
 
 struct JointAnimCompressedControl {
@@ -70,38 +135,19 @@ struct JointAnimCompressedControl {
   u32 fixed_qwc;
   u32 frame_qwc;
   JointAnimCompressedFixed fixed;
-  std::vector<JointAnimCompressedFrame> frames;  // actual frame data array
+  std::vector<JointAnimCompressedFrame> frame;
 };
 
-struct Art{
+struct ArtJointAnim {
   std::string name;
-  int length;
-  u8 extra;
-};
-
-struct ArtElement : Art {
-  u8 pad[12];
-};
-
-struct ArtJointAnim : ArtElement {
-  MercEyeAnimBlock eye_anim_data;
   float speed;
   float artist_base;
   float artist_step;
-  std::string master_art_group_name;
-  int master_art_group_index;
-  
-  // blerc_data: per-frame blend shape weights for facial animation
-  // Format: array of uint8 organized as frames × blend_targets
-  // Each frame has blend_target_count values (from merc-ctrl header)
-  // Values are offset by 64: actual_weight = (stored_value - 64) * 64
-  std::vector<std::vector<u8>> blerc_data;  // [frame_idx][target_idx]
-  std::vector<u8> blerc_flat;               // flat array in runtime order [f0 targets][f1 targets]...
-  int blerc_blend_target_count = 0;  // number of blend targets (from merc-ctrl)
-  
+  s16 length;
   JointAnimCompressedControl frames;
-  std::vector<JointAnimCompressed> data;
+  std::vector<u8> blend_shape_data;
 };
+
 /*!
  * Data extracted from art groups that is not needed for .FR3, but is potentially needed for other
  * stuff (skeleton export).
@@ -110,9 +156,7 @@ struct ArtData {
   std::string art_group_name;
   std::string art_name;
   std::vector<Joint> joint_group;
-  std::vector<ArtJointAnim> joint_anims;
-
-  int blerc_blend_target_count = 0;
+  std::vector<ArtJointAnim> anims;
 };
 
 }  // namespace level_tools

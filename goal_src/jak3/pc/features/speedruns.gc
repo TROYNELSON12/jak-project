@@ -143,6 +143,10 @@
                 lighteco
                 darkeco))
 
+(defun reset-speedrunner-mode-hm-secrets! ((obj pc-settings-jak3))
+  (set! (-> obj speedrunner-mode-hm-secrets) (the-as uint64 HERO_MODE_SECRETS))
+  (none))
+
 (define-extern reset-arena-trainer-globals (function none))
 (defmethod start-run! ((this speedrun-info))
   ;; turn on speedrun verification display
@@ -175,9 +179,41 @@
          (play-task (game-task arena-training-1) 'debug #f)
          (until (and *target* (!= (-> *target* next-state name) 'target-continue))
            (suspend))
+         (mark-played! (-> *talker-speech* 138)) ;; prevent 600 orbs popup
+         (send-event *target* 'get-pickup (pickup-type skill) 1000.0)
          (send-event *target* 'get-pickup (pickup-type gem) 1000.0)
-         (set! (-> *game-info* secrets) HERO_MODE_SECRETS)
-         (set! (-> *game-info* purchase-secrets) HERO_MODE_SECRETS)
+         (set! (-> *game-info* secrets) (the-as game-secrets (-> *pc-settings* speedrunner-mode-hm-secrets)))
+         (set! (-> *game-info* purchase-secrets) (the-as game-secrets (-> *pc-settings* speedrunner-mode-hm-secrets)))
+         (set! (-> *game-info* features) HERO_MODE_FEATURES))))
+    (((speedrun-category act-2))
+      (start 'play (get-continue-by-name *game-info* (play-task (game-task sewer-met-hum) 'debug 'play)))
+      (set-master-mode 'game))
+    (((speedrun-category act-3))
+      (start 'play (get-continue-by-name *game-info* (play-task (game-task temple-defend) 'debug 'play)))
+      (set-master-mode 'game))
+    (((speedrun-category post-game))
+     (process-spawn-function process
+       (lambda :behavior process ()
+         (set! (-> *game-info* mode) 'debug)
+         (initialize! *game-info* 'game (the game-save #f) (the string #f) (the resetter-spec #f))
+         (set! (-> *game-info* mode) 'play)
+         (task-close! "city-win-introduction")
+         (start 'play (get-continue-by-name *game-info* "wascity-start"))
+         )))
+    (((speedrun-category post-game-heromode))
+     (process-spawn-function process
+       (lambda :behavior process ()
+         (set! (-> *game-info* mode) 'debug)
+         (initialize! *game-info* 'game (the game-save #f) (the string #f) (the resetter-spec #f))
+         (set! (-> *game-info* mode) 'play)
+         (logior! (-> *game-info* secrets) (game-secrets hero-mode))
+         (logior! (-> *game-info* purchase-secrets) (game-secrets hero-mode))
+         (task-close! "city-win-introduction")
+         (start 'play (get-continue-by-name *game-info* "wascity-start"))
+         (until (and *target* (!= (-> *target* next-state name) 'target-continue))
+           (suspend))
+         (set! (-> *game-info* secrets) (the-as game-secrets (-> *pc-settings* speedrunner-mode-hm-secrets)))
+         (set! (-> *game-info* purchase-secrets) (the-as game-secrets (-> *pc-settings* speedrunner-mode-hm-secrets)))
          (set! (-> *game-info* features) HERO_MODE_FEATURES))))
     (((speedrun-category all-cheats-allowed))
      (process-spawn-function process
@@ -209,8 +245,10 @@
   ;;   probably like the game to automatically set the appropriate ones for you
   ;; - If you are playing a category that forbids cheats, you wouldn't want your run invalidated because you forgot
   (case (-> this category)
-    (((speedrun-category newgame-normal) (speedrun-category newgame-heromode))
-     ;; disable any active cheats
+    (((speedrun-category newgame-normal) (speedrun-category newgame-heromode)
+      (speedrun-category act-2) (speedrun-category act-3)
+      (speedrun-category post-game) (speedrun-category post-game-heromode))
+     ;; disable any active PC cheats
      (set! (-> *pc-settings* cheats) (pc-cheats)))
     (((speedrun-category custom))
      (set! (-> *game-info* purchase-secrets) (-> *speedrun-info* active-custom-category secrets))
@@ -388,6 +426,42 @@
                         (= (-> *speedrun-info* category) (speedrun-category newgame-heromode))))
                  (new 'static
                       'popup-menu-flag
+                      :label "Act 2"
+                      :on-confirm
+                      (lambda ()
+                        (set-category! *speedrun-info* (speedrun-category act-2)))
+                      :is-toggled?
+                      (lambda ()
+                        (= (-> *speedrun-info* category) (speedrun-category act-2))))
+                 (new 'static
+                      'popup-menu-flag
+                      :label "Act 3"
+                      :on-confirm
+                      (lambda ()
+                        (set-category! *speedrun-info* (speedrun-category act-3)))
+                      :is-toggled?
+                      (lambda ()
+                        (= (-> *speedrun-info* category) (speedrun-category act-3))))
+                 (new 'static
+                      'popup-menu-flag
+                      :label "Post-Game"
+                      :on-confirm
+                      (lambda ()
+                        (set-category! *speedrun-info* (speedrun-category post-game)))
+                      :is-toggled?
+                      (lambda ()
+                        (= (-> *speedrun-info* category) (speedrun-category post-game))))
+                 (new 'static
+                      'popup-menu-flag
+                      :label "Post-Game Hero Mode"
+                      :on-confirm
+                      (lambda ()
+                        (set-category! *speedrun-info* (speedrun-category post-game-heromode)))
+                      :is-toggled?
+                      (lambda ()
+                        (= (-> *speedrun-info* category) (speedrun-category post-game-heromode))))
+                 (new 'static
+                      'popup-menu-flag
                       :label "All Cheats Allowed"
                       :on-confirm
                       (lambda ()
@@ -395,6 +469,26 @@
                       :is-toggled?
                       (lambda ()
                         (= (-> *speedrun-info* category) (speedrun-category all-cheats-allowed))))))
+       (new 'static
+            'popup-menu-dynamic-submenu
+            :label "Select Hero Mode secrets"
+            :get-length
+            (lambda ()
+              58)
+            :get-entry-label
+            (lambda ((index int) (str-dest string))
+              (copy-string<-string str-dest (bitfield->string game-secrets index)))
+            :on-entry-confirm
+            (lambda ((index int))
+              (logxor! (-> *pc-settings* speedrunner-mode-hm-secrets) (shl 1 index))
+              (pc-settings-save))
+            :entry-selected?
+            (lambda ((index int))
+              (logtest? (-> *pc-settings* speedrunner-mode-hm-secrets) (shl 1 index)))
+            :on-reset
+            (lambda ()
+              (reset-speedrunner-mode-hm-secrets! *pc-settings*)
+              (pc-settings-save)))
        (new 'static
             'popup-menu-dynamic-submenu
             :label "Custom Category Select"
