@@ -403,10 +403,10 @@ int make_color_buffer_accessor(const std::vector<tfrag3::MercVertex>& vertices,
   std::vector<float> floats;
 
   for (size_t i = 0; i < vertices.size(); i++) {
-    for (int j = 0; j < 3; j++) {
+    for (int j = 0; j < 4; j++) {
       floats.push_back(((float)vertices[i].rgba[j]) / 255.f);
     }
-    floats.push_back(1.f);
+    //floats.push_back(1.f);
   }
   memcpy(buffer.data.data(), floats.data(), sizeof(float) * floats.size());
 
