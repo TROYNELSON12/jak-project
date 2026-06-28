@@ -173,21 +173,24 @@ void unstrip_merc_draws(const std::vector<u32>& stripped_indices,
         auto& vb = vertices[b];
         auto& vc = vertices[c];
 
+        math::Vector3f posa(va.pos[0], va.pos[1], va.pos[2]);
+        math::Vector3f posb(vb.pos[0], vb.pos[1], vb.pos[2]);
+        math::Vector3f posc(vc.pos[0], vc.pos[1], vc.pos[2]);
+
+        math::Vector3f edge1 = posb - posa;
+        math::Vector3f edge2 = posc - posa;
+        math::Vector3f face_normal = edge1.cross(edge2);
+
         math::Vector3f na(va.normal[0], va.normal[1], va.normal[2]);
         math::Vector3f nb(vb.normal[0], vb.normal[1], vb.normal[2]);
         math::Vector3f nc(vc.normal[0], vc.normal[1], vc.normal[2]);
 
-        math::Vector3f avg_normal = (na + nb + nc).normalized();
+        math::Vector3f vtx_normal = (na + nb + nc).normalized();
 
-        math::Vector3f pa(va.pos[0], va.pos[1], va.pos[2]);
-        math::Vector3f pb(vb.pos[0], vb.pos[1], vb.pos[2]);
-        math::Vector3f pc(vc.pos[0], vc.pos[1], vc.pos[2]);
 
-        math::Vector3f edge1 = pb - pa;
-        math::Vector3f edge2 = pc - pa;
-        math::Vector3f face_normal = edge1.cross(edge2).normalized();
+        float dot = face_normal.dot(vtx_normal);
 
-        if (face_normal.dot(avg_normal) < 0.0f) {
+        if (dot < 0.0f) {
           unstripped.push_back(a);
           unstripped.push_back(c);
           unstripped.push_back(b);
