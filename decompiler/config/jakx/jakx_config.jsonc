@@ -20,9 +20,9 @@
   "disassemble_code": false,
 
   // Run the decompiler
-  "decompile_code": true,
+  "decompile_code": false,
 
-  "find_functions": true,
+  "find_functions": false,
 
   ////////////////////////////
   // DATA ANALYSIS OPTIONS
@@ -34,21 +34,25 @@
   "disassemble_data": false,
 
   // unpack textures to assets folder
-  "process_tpages": false,
+  "process_tpages": true,
   // write goal imports for tpages and textures
-  "write_tpage_imports": false,
+  "write_tpage_imports": true,
   // unpack game text to assets folder
   "process_game_text": false,
   // unpack game count to assets folder
   "process_game_count": false,
   // write goal imports for art groups
   "process_art_groups": false,
+  // write goal imports for the part group table
+  "process_part_group_table": true,
   // write out a json file containing the art info mapping, run this with all objects allowed
   "dump_art_group_info": false,
   // write out a json file containing the joint node mapping, run this with all objects allowed
   "dump_joint_geo_info": false,
   // write out a json file containing tpage and texture mappings, run with all objects allowed
-  "dump_tex_info": false,
+  "dump_tex_info": true,
+  // write out a json file containing the part group table, run with all objects allowed
+  "dump_part_group_table": false,
 
   // set to false to skip adding .STR files to the decompiler database
   "read_spools": true,
@@ -102,31 +106,31 @@
   "inputs_file": "decompiler/config/jakx/ntsc_v1/inputs.jsonc",
   "art_info_file": "decompiler/config/jakx/ntsc_v1/art_info.jsonc",
   "import_deps_file": "decompiler/config/jakx/ntsc_v1/import_deps.jsonc",
-  "all_types_file": "decompiler/config/ntsc_v1/all-types.gc",
-  "art_group_dump_file": "decompiler/config/ntsc_v1/art-group-info.min.json",
-  "joint_node_dump_file": "decompiler/config/ntsc_v1/joint-node-info.min.json",
-  "tex_dump_file": "decompiler/config/ntsc_v1/tex-info.min.json",
-  "process_stack_size_file": "decompiler/config/ntsc_v1/process_stack_size_overrides.jsonc",
+  "all_types_file": "decompiler/config/jakx/all-types.gc",
+  "art_group_dump_file": "decompiler/config/jakx/ntsc_v1/art-group-info.min.json",
+  "joint_node_dump_file": "decompiler/config/jakx/ntsc_v1/joint-node-info.min.json",
+  "tex_dump_file": "decompiler/config/jakx/ntsc_v1/tex-info.min.json",
+  "process_stack_size_file": "decompiler/config/jakx/ntsc_v1/process_stack_size_overrides.jsonc",
 
   // optional: a predetermined object file name map from a file.
   // this will make decompilation naming consistent even if you only run on some objects.
-  "obj_file_name_map_file": "goal_src/jakx/build/all_objs.json",
+  //"obj_file_name_map_file": "goal_src/jakx/build/all_objs.json",
 
   ////////////////////////////
   // LEVEL EXTRACTION
   ////////////////////////////
 
   // turn this on to extract level background graphics data as .fr3 files in out/<game>/fr3
-  "levels_extract": false,
+  "levels_extract": true,
   // turn this on if you want extracted levels to be saved out as .glb files in glb_out/<game>
-  "rip_levels": false,
+  "rip_levels": true,
   // should we also extract collision meshes to the .fr3 files?
   // these can be displayed in-game with the OpenGOAL collision renderer
   "extract_collision": true,
   // turn this on if you want extracted level collision to be saved as .obj files in debug_out/<game>
-  "rip_collision": false,
+  "rip_collision": true,
   // save game textures as .png files to decompiler_out/<game>/textures
-  "save_texture_pngs": false,
+  "save_texture_pngs": true,
 
   // whether or not to dump out streamed audio files to decompiler_out/<game>/audio
   "rip_streamed_audio": false,
@@ -150,6 +154,12 @@
       "game_name": "jakx_pal",
       "expected_elf_name": "SCES_532.86",
       "is_pal": true,
+      "object_patches": {}
+    },
+    "preview": {
+      "game_name": "jakx_preview",
+      "expected_elf_name": "SCUS_974.29",
+      "is_pal": false,
       "object_patches": {}
     }
   }
