@@ -151,7 +151,7 @@ void extract_art_groups_from_level(const ObjectFileDB& db,
     for (const auto& file : files) {
       if (file.name.length() > 3 && !file.name.compare(file.name.length() - 3, 3, "-ag")) {
         const auto& ag_file = db.lookup_record(file);
-        extract_merc(ag_file, tex_db, db.dts, tex_remap, level_data, false, db.version(),
+        extract_merc(ag_file, tex_db, db.dts, tex_remap, level_data, true, db.version(),
                      swapped_info, art_group_data);
         extract_joint_group(ag_file, db.dts, db.version(), art_group_data);
         //extract_joint_anim(ag_file, db.dts, db.version(), art_group_data, false);
@@ -225,6 +225,7 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
   }
 
   json_data["name"] = bsp_header.name;
+  json_data["game-version"] = db.version();
 
   /*
   level_tools::PrintSettings settings;
@@ -307,7 +308,20 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
                           fmt::format("{}-{}-collide", dgo_name, i++), db.dts, level_data);
   }
   if (bsp_header.hfrag) {
-    extract_hfrag(bsp_header, tex_db, &level_data);
+    json_data["hfrag"] = extract_hfrag(bsp_header, tex_db, &level_data);
+    std::string hfrag_obj = export_hfrag_to_obj(level_data.hfrag,
+                                                level_data,
+                                                tex_db,
+                                                db.version());
+
+    auto obj_path = file_util::get_jak_project_dir() / "decompiler_out" /
+                    game_version_names[db.version()] / "levels" / level_data.level_name /
+                    fmt::format("{}-background", level_data.level_name);
+    obj_path = obj_path / "hfrag";
+
+    auto file_path = obj_path / "hfrag-0.obj";
+    file_util::create_dir_if_needed_for_file(file_path);
+    file_util::write_text_file(file_path, hfrag_obj);
   }
   level_data.level_name = bsp_header.name;
 
@@ -371,8 +385,7 @@ std::map<std::string, level_tools::ArtData> extract_common(const ObjectFileDB& d
 
   // add animated textures that are missing.
   for (const auto& [id, normal_texture] : tex_db.textures) {
-    if (config.animated_textures.count(normal_texture.name) &&
-        !textures_we_have.count(normal_texture.name)) {
+    if (config.animated_textures.count(normal_texture.name) && !textures_we_have.count(normal_texture.name)) {
       textures_we_have.insert(normal_texture.name);
       tfrag_level.textures.push_back(
           make_texture(id, normal_texture, tex_db.tpage_names.at(normal_texture.page), false));
@@ -470,8 +483,10 @@ void extract_from_level(const ObjectFileDB& db,
                     game_version_names[db.version()] / "levels" / level_data.level_name /
                     fmt::format("{}-background", level_data.level_name);
 
-  file_util::write_text_file(level_path / fmt::format("{}_info.jfp", level_data.level_name),
-                             json_level_data.dump(2));
+  auto jfp_path = level_path / fmt::format("{}_info.jfp", level_data.level_name);
+
+  if (fs::exists(level_path))
+    file_util::write_text_file(jfp_path, json_level_data.dump(2));
 }
 
 void extract_all_levels(const ObjectFileDB& db,
@@ -486,14 +501,17 @@ void extract_all_levels(const ObjectFileDB& db,
   file_util::create_dir_if_needed(entities_dir);
 
   std::vector<std::map<std::string, level_tools::ArtData>> level_art_data(dgo_names.size());
-  SimpleThreadGroup threads;
-  threads.run(
-      [&](int idx) {
-        extract_from_level(db, tex_db, dgo_names[idx], config, output_path, entities_dir,
-                           level_art_data[idx]);
-      },
-      dgo_names.size());
-  threads.join();
+  for (int idx = 0; idx < dgo_names.size(); idx++)
+    extract_from_level(db, tex_db, dgo_names[idx], config, output_path, entities_dir,
+                       level_art_data[idx]);
+  //SimpleThreadGroup threads;
+  //threads.run(
+  //    [&](int idx) {
+  //      extract_from_level(db, tex_db, dgo_names[idx], config, output_path, entities_dir,
+  //                         level_art_data[idx]);
+  //    },
+  //    dgo_names.size());
+  //threads.join();
 
   std::map<std::string, level_tools::ArtData> aggregated_art_data;
   merge_art_group_data(aggregated_art_data, common_art_data);

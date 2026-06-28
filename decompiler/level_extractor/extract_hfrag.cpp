@@ -17,10 +17,12 @@ int corner_xz_to_index(int x, int z) {
   return z * kCornersPerEdge + x;
 }
 
-void extract_hfrag(const level_tools::BspHeader& bsp, const TextureDB& tex_db, tfrag3::Level* out) {
+bool extract_hfrag(const level_tools::BspHeader& bsp, const TextureDB& tex_db, tfrag3::Level* out) {
   ASSERT(bsp.hfrag.has_value());
   const auto& hfrag = bsp.hfrag.value();
   auto& hfrag_out = out->hfrag;
+
+  hfrag_out.exists = true;
 
   hfrag_out.occlusion_offset = bsp.visible_list_length - bsp.extra_vis_list_length;
 
@@ -76,6 +78,9 @@ void extract_hfrag(const level_tools::BspHeader& bsp, const TextureDB& tex_db, t
                 vert.u = qx;
                 vert.v = qz;
                 vert.vi = vi;
+
+                const u16 packed = data >> 16;
+                vert.pad = packed >> 11;
               }
             }
             hfrag_out.indices.push_back(UINT32_MAX);
@@ -153,6 +158,8 @@ void extract_hfrag(const level_tools::BspHeader& bsp, const TextureDB& tex_db, t
     }
   }
 
+  return true;
+
   std::string result = fmt::format(
                                     "ply\nformat ascii 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nelement face {}\nproperty list uchar int vertex_index\nend_header\n",
                                     kVertsPerEdge * kVertsPerEdge, 2 * (kVertsPerEdge - 1) * (kVertsPerEdge - 1));
@@ -175,7 +182,7 @@ void extract_hfrag(const level_tools::BspHeader& bsp, const TextureDB& tex_db, t
       const float v_height = ((float)v_height_u16) * 8;
       const u16 cv_packed = cv_data >> 16;
       const u16 bucket = cv_packed >> 11;
-      const u16 bucket_color = bucket * 10;
+      const u16 bucket_color = (cv_data >> 16) & 0b111'1111'1111;
       if (cx * kVertsPerCorner == vx && cz * kVertsPerCorner == vz) {
         printf("bucket %d\n", bucket);
       }
@@ -197,5 +204,51 @@ void extract_hfrag(const level_tools::BspHeader& bsp, const TextureDB& tex_db, t
   auto file_path = file_util::get_file_path({"debug_out", "hfrag.ply"});
   file_util::create_dir_if_needed_for_file(file_path);
   file_util::write_text_file(file_path, result);
+
+  return true;
 }
+
+std::string export_hfrag_to_obj(tfrag3::Hfragment hfrag,
+                                tfrag3::Level& lev,
+                                const TextureDB& tdb,
+                                GameVersion version) {
+  std::string result;
+
+  for (const auto& v : hfrag.vertices) {
+    int vx = v.vi % kVertsPerEdge;
+    int vz = v.vi / kVertsPerEdge;
+
+    float x = vx * kVertSpacing * 8;
+    float y = v.height / 4096.0f;
+    float z = vz * kVertSpacing * 8;
+
+    result += fmt::format("v {} {} {}\n", x, y, z);
+  }
+
+  for (const auto& v : hfrag.vertices) {
+    result += fmt::format("vt {} {}\n", (float)v.u, (float)v.v);
+  }
+
+  for (const auto& v : hfrag.vertices) {
+    result += fmt::format("vp {}\n", v.color_index);
+  }
+
+  for (const auto& v : hfrag.vertices) {
+    result += fmt::format("vb {}\n", v.pad);
+  }
+
+  result += fmt::format("d texture:{} drawmode:{}\n", hfrag.wang_tree_tex_id[0], hfrag.draw_mode.as_int());
+
+  const auto& idx = hfrag.indices;
+  for (size_t i = 0; i + 2 < idx.size(); i++) {
+    if (idx[i] == UINT32_MAX || idx[i + 1] == UINT32_MAX || idx[i + 2] == UINT32_MAX) {
+      continue;
+    }
+
+    result += fmt::format("f {} {} {}\n", idx[i] + 1, idx[i + 1] + 1, idx[i + 2] + 1);
+  }
+
+  return result;
+}
+
 }  // namespace decompiler

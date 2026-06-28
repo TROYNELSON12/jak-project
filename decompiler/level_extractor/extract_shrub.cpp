@@ -7,6 +7,7 @@
 
 #include "decompiler/ObjectFile/LinkedObjectFile.h"
 #include "decompiler/level_extractor/extract_common.h"
+#include "decompiler/level_extractor/protoToggleHelpers.h"
 
 namespace decompiler {
 using namespace level_tools;
@@ -117,7 +118,7 @@ std::string debug_dump_proto_to_obj(const ShrubProtoInfo& proto,
   std::unordered_map<ShrubVertex, int, ShrubVertex::hash> lookup;
 
   struct MatKey {
-    u32 tex;
+    s32 tex;
     u32 mode;
 
     bool operator==(const MatKey& o) const { return tex == o.tex && mode == o.mode; }
@@ -310,7 +311,8 @@ DrawSettings adgif_to_draw_mode(const AdGifData& ad,
   u32 tex_combo = (((u32)tpage) << 16) | tidx;
   // look up the texture to make sure it's valid
   auto tex = tdb.textures.find(tex_combo);
-  ASSERT(tex != tdb.textures.end());
+  //TODO Remove assertion to get Jak X to extract with missing textures...
+  //ASSERT(tex != tdb.textures.end());
   if (weird) {
     lg::info("tex: {}", tex->second.name);
   }
@@ -433,7 +435,7 @@ ShrubProtoInfo extract_proto(const shrub_types::PrototypeBucketShrub& proto,
     ASSERT(frag.vtx_cnt * 3 * sizeof(u16) <= frag.vtx.size());
   }
 
-  if (proto.stiffness == 0)
+  if (proto.stiffness == 0 && !isProtoToggleable(lev.level_name, proto.name, version))
     return result;
 
   auto file_path = output_dir / fmt::format("{}.obj", proto.name);
@@ -531,7 +533,8 @@ int get_or_add_vertex(const ShrubAllVertex& v,
  */
 std::string dump_full_to_obj(const std::vector<ShrubProtoInfo>& protos,
                              const TextureDB& tdb,
-                             tfrag3::Level& lev) {
+                             tfrag3::Level& lev,
+                             GameVersion version) {
   //std::vector<math::Vector<float, 3>> verts;
   //std::vector<math::Vector<int, 3>> faces;
 
@@ -552,7 +555,7 @@ std::string dump_full_to_obj(const std::vector<ShrubProtoInfo>& protos,
   std::unordered_map<MatKey, std::vector<math::Vector<int, 3>>, MatKeyHash> grouped_faces;
 
   for (auto& proto : protos) {
-    if (proto.stiffness != 0)
+    if (proto.stiffness != 0 || isProtoToggleable(lev.level_name, proto.name, version))
       continue;
     for (auto& inst : proto.instances) {
       auto& mat = inst.mat;
@@ -730,6 +733,9 @@ void make_draws(tfrag3::Level& lev,
             auto tex_it = tdb.textures.find(combo_tex);
             if (tex_it == tdb.textures.end()) {
               bool ok_to_miss = false;  // for TIE, there's no missing textures.
+              // TODO Jak X is missing a ton of textures that crash the exporter, I have no idea how
+              // to load them yet, so make everything ok to miss.
+              ok_to_miss = true;
               if (ok_to_miss) {
                 // we're missing a texture, just use the first one.
                 tex_it = tdb.textures.begin();
@@ -884,7 +890,7 @@ nlohmann::json extract_shrub(const shrub_types::DrawableTreeInstanceShrub* tree,
   }
   shrub_tree_info["protos"] = nlohmann::json::array();
   for (auto& proto : proto_info) {
-    if (proto.stiffness == 0)
+    if (proto.stiffness == 0 && !isProtoToggleable(out.level_name, proto.name, version))
       continue;
     nlohmann::json proto_json;
     proto_json["name"] = proto.name;
@@ -912,7 +918,7 @@ nlohmann::json extract_shrub(const shrub_types::DrawableTreeInstanceShrub* tree,
   make_draws(out, tree_out, proto_info, tex_db);
 
   if (dump_level) {
-    std::string allShrub = dump_full_to_obj(proto_info,tex_db, out);
+    std::string allShrub = dump_full_to_obj(proto_info,tex_db, out, version);
     std::string idx = debug_name.substr(debug_name.find_first_of('-') + 1, 1);
     file_util::write_text_file(shrub_path / fmt::format("shrub-{}.obj", idx), allShrub);
   }

@@ -58,7 +58,7 @@ nlohmann::json export_level_textures(const tfrag3::Level& level,
   nlohmann::json tex_info;
   //std::string result = "Level texture index table:\n";
   for (int i = 0; i < level.textures.size(); i++) {
-    if (!tex_map.contains(i))
+    if (tex_map.find(i) == tex_map.end())
       continue;
     auto& tex = level.textures[i];
     tex_info[std::to_string(i)] = tex.debug_name;
@@ -100,7 +100,7 @@ std::string add_tfrag(const tfrag3::Level& level,
   std::vector<float> tods;
   std::vector<std::vector<math::Vector<int, 3>>> faces;
   std::vector<u32> DrawModes;
-  std::vector<u32> Textures;
+  std::vector<s32> Textures;
 
   std::string kind = tfrag3::tfrag_tree_names[(int)tfrag.kind];
 
@@ -204,7 +204,7 @@ std::string add_tie(const tfrag3::Level& level,
 
   std::vector<std::vector<math::Vector<int, 3>>> faces(tie.static_draws.size());
   std::vector<u32> DrawModes;
-  std::vector<u32> Textures;
+  std::vector<s32> Textures;
 
   for (int draw_idx = 0; draw_idx < tie.static_draws.size(); draw_idx++) {
     const auto& draw = tie.static_draws[draw_idx];
@@ -343,7 +343,7 @@ std::string add_shrub(const tfrag3::Level& level,
   std::vector<math::Vector<u8, 4>> rgba;
   std::vector<std::vector<math::Vector<int, 3>>> faces;
   std::vector<u32> DrawModes;
-  std::vector<u32> Textures;
+  std::vector<s32> Textures;
 
   for (auto& vertex : shrub.packed_vertices.vertices) {
     math::Vector4f v;
@@ -392,12 +392,50 @@ std::string add_shrub(const tfrag3::Level& level,
     }
   }
 
-  auto file_name = fmt::format("tie-{}", index);
+  auto file_name = fmt::format("shrub-{}", index);
   auto file_path = output_dir / fmt::format("{}.obj", file_name);
   file_util::create_dir_if_needed_for_file(file_path);
   //file_util::write_text_file(file_path, result);
   //export_tod_texture(shrub.time_of_day_colors, output_dir, file_name);
   return returnResult;
+}
+
+void add_hfrag(const tfrag3::Level& level,
+               const tfrag3::Hfragment& hfrag,
+               const fs::path& output_dir,
+               std::unordered_set<int>& tex_map,
+               u32 index) {
+  std::vector<math::Vector4f> verts;
+  std::vector<math::Vector<float, 2>> txcrds;
+  std::vector<float> tods;
+  std::vector<std::vector<math::Vector<int, 3>>> faces;
+  std::vector<u32> DrawModes;
+  std::vector<s32> Textures;
+
+  tex_map.insert(hfrag.wang_tree_tex_id[0]);
+
+  //std::string result;
+  //for (auto& vert : verts) {
+  //  result += fmt::format("v {} {} {}\n", vert.x(), vert.y(), vert.z());
+  //}
+  //for (auto& tc : txcrds) {
+  //  result += fmt::format("vt {} {}\n", tc.x(), tc.y());
+  //}
+  //for (auto& tod : tods) {
+  //  result += fmt::format("t {}\n", tod);
+  //}
+  //for (int draw_idx = 0; draw_idx < hfrag.draws.size(); draw_idx++) {
+  //  result += fmt::format("d texture:{} drawmode:{}\n", Textures[draw_idx], DrawModes[draw_idx]);
+  //  for (auto& face : faces[draw_idx]) {
+  //    result += fmt::format("f {}/{} {}/{} {}/{}\n", face.x() + 1, face.x() + 1, face.y() + 1,
+  //                          face.y() + 1, face.z() + 1, face.z() + 1);
+  //  }
+  //}
+  //auto file_name = fmt::format("hfrag-{}", index);
+  //auto file_path = output_dir / fmt::format("{}.obj", file_name);
+  //file_util::create_dir_if_needed_for_file(file_path);
+  // file_util::write_text_file(file_path, result);
+  // export_tod_texture(tfrag.colors, output_dir, file_name);
 }
 
 /*!
@@ -428,6 +466,12 @@ void save_level_background_as_obj(const tfrag3::Level& level, const fs::path& ob
     const auto& shrub = level.shrub_trees.at(i);
     result += add_shrub(level, shrub, obj_path / "shrub", tex_map, i);
     export_tod_texture(shrub.time_of_day_colors, obj_path / "palettes", fmt::format("shrub-{}", i));
+  }
+
+  auto& hfrag = level.hfrag;
+  if (hfrag.exists) {
+    add_hfrag(level, hfrag, obj_path / "hfrag", tex_map, 0);
+    export_tod_texture(hfrag.time_of_day_colors, obj_path / "palettes", fmt::format("hfrag-{}", 0));
   }
 
   level_json["texture-index-table"] = export_level_textures(level, obj_path / "textures", tex_map);

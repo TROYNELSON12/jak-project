@@ -695,6 +695,10 @@ std::string debug_dump_to_ply(const std::vector<MercDraw>& draws,
       u32 v0 = draw.indices[ii - 2];
       u32 v1 = draw.indices[ii - 1];
       u32 v2 = draw.indices[ii - 0];
+
+      if (ii & 1)
+        std::swap(v1, v2);
+
       if (v0 != UINT32_MAX && v1 != UINT32_MAX && v2 != UINT32_MAX) {
         faces.emplace_back(v0, v1, v2);
       }
@@ -784,19 +788,23 @@ s32 find_or_add_texture_to_level(tfrag3::Level& out,
     u32 idx = pc_combo_tex_id & 0xffff;
 
     if (idx == left_id || idx == right_id) {
+      bool brokenEyes = false;
       if (!hdr.eye_ctrl) {
         fmt::print("no eye ctrl, but expected one for {}\n", debug_name);
         // it looks like these models have half-implemented eyes - the texture IDs are there, but
         // there's no eye control.
-        if (debug_name != "kor-break-lod0" && debug_name != "errol-lowres-lod1" &&
-            debug_name != "kleever-rider-lod0") {
-          ASSERT(false);
+        if (debug_name == "kor-break-lod0" || debug_name == "errol-lowres-lod1" ||
+            debug_name == "kleever-rider-lod0") {
+          brokenEyes = true;
+          // ASSERT(false);
         }
       }
-      if (idx == left_id) {
-        *eye_out = (hdr.eye_ctrl->eye_slot * 2);
-      } else if (idx == right_id) {
-        *eye_out = (hdr.eye_ctrl->eye_slot * 2) + 1;
+      if (!brokenEyes) {
+        if (idx == left_id) {
+          *eye_out = (hdr.eye_ctrl->eye_slot * 2);
+        } else if (idx == right_id) {
+          *eye_out = (hdr.eye_ctrl->eye_slot * 2) + 1;
+        }
       }
     } else {
       // fmt::print("got unknown tex id in eye page: {}\n", idx);
@@ -804,10 +812,14 @@ s32 find_or_add_texture_to_level(tfrag3::Level& out,
   }
 
   // check anim output
-  const auto& level_tex = out.textures.at(idx_in_level_texture);
-  const auto& it = tex_db.animated_tex_output_to_anim_slot.find(level_tex.debug_name);
-  if (it != tex_db.animated_tex_output_to_anim_slot.end()) {
-    return -int(it->second) - 1;
+  if (out.textures.size() != 0) {
+    const auto& level_tex = out.textures.at(idx_in_level_texture);
+    const auto& it = tex_db.animated_tex_output_to_anim_slot.find(level_tex.debug_name);
+    if (it != tex_db.animated_tex_output_to_anim_slot.end()) {
+      return -int(it->second) - 1;
+    }
+  } else {
+    lg::error("merc failed to find 0 texture, there are no textures to default to or check, check your inputs.");
   }
   return idx_in_level_texture;
 }

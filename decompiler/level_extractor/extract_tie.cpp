@@ -2,11 +2,14 @@
 
 #include <array>
 
+#include <unordered_set>
+
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 #include "common/util/string_util.h"
 
 #include "decompiler/ObjectFile/LinkedObjectFile.h"
+#include "decompiler/level_extractor/protoToggleHelpers.h"
 
 #include "third-party/tiny_gltf/tiny_gltf.h"
 #include "third-party/stb_image/stb_image_write.h"
@@ -2503,6 +2506,7 @@ std::string debug_dump_proto_to_obj(const TieProtoInfo& proto,
       break;
     case GameVersion::Jak2:
     case GameVersion::Jak3:
+    case GameVersion::JakX:
       info = get_jak2_tie_category(proto.proto_flag);
       break;
     default:
@@ -2513,7 +2517,7 @@ std::string debug_dump_proto_to_obj(const TieProtoInfo& proto,
   std::unordered_map<TieProtoVertex, int, TieProtoVertex::hash> lookup;
 
   struct MatKey {
-    u32 tex;
+    s32 tex;
     u32 mode;
 
     bool operator==(const MatKey& o) const { return tex == o.tex && mode == o.mode; }
@@ -2537,7 +2541,7 @@ std::string debug_dump_proto_to_obj(const TieProtoInfo& proto,
   int frag_idx = 0;
   for (auto& frag : proto.frags) {
     for (auto& strip : frag.strips) {
-      u32 tex = get_or_add_texture(strip.adgif.combo_tex, lev, tdb);
+      s32 tex = get_or_add_texture(strip.adgif.combo_tex, lev, tdb);
       DrawMode mode = process_draw_mode(strip.adgif, frag.prog_info.misc_x == 0,
                                         frag.has_magic_tex0_bit, version, info.category);
       MatKey key{tex, mode.as_int()};
@@ -2607,8 +2611,11 @@ std::string debug_dump_proto_to_obj(const TieProtoInfo& proto,
       v.nrm.normalize();
     result += fmt::format("vn {} {} {}\n", v.nrm.x(), v.nrm.y(), v.nrm.z());
   }
-  if (info.uses_envmap)
-    result += fmt::format("pr texture:{} drawmode:{}\n", envmap_tex_idx, envmap_drawmode.as_int());
+  if (!info.uses_envmap)
+    result += fmt::format("pr flags:{}\n", proto.proto_flag);
+  else
+    result += fmt::format("pr flags:{} texture:{} drawmode:{}\n", proto.proto_flag, envmap_tex_idx, envmap_drawmode.as_int());
+
   for (auto& [key, face_list] : grouped_faces) {
     result += fmt::format("d texture:{} drawmode:{}\n", key.tex, key.mode);
 
@@ -2693,29 +2700,30 @@ std::string dump_full_to_obj(const std::vector<TieProtoInfo>& protos,
   std::unordered_map<TieAllVertex, int, TieAllVertex::hash> lookup;
 
   struct MatKey {
-    u32 tex;
+    s32 tex;
     u32 mode;
-    u32 envtex;
+    s32 envtex;
     u32 envmode;
     bool uses_envmap;
+    u32 proto_flags;
 
     bool operator==(const MatKey& o) const {
       return tex == o.tex && mode == o.mode && envtex == o.envtex && envmode == o.envmode;
-      uses_envmap == o.uses_envmap;
+      uses_envmap == o.uses_envmap && proto_flags == o.proto_flags;
     }
   };
 
   struct MatKeyHash {
     size_t operator()(const MatKey& k) const {
       return size_t(k.tex) ^ size_t(k.mode) ^ size_t(k.envtex) ^ size_t(k.envmode) ^
-             size_t(k.uses_envmap);
+             size_t(k.uses_envmap) ^ size_t(k.proto_flags);
     }
   };
 
   std::unordered_map<MatKey, std::vector<math::Vector<int, 3>>, MatKeyHash> grouped_faces;
 
   for (auto& proto : protos) {
-    if (proto.stiffness != 0)
+    if (proto.stiffness != 0 || isProtoToggleable(lev.level_name, proto.name, version))
       continue;
     TieCategoryInfo info;
     switch (version) {
@@ -2724,12 +2732,13 @@ std::string dump_full_to_obj(const std::vector<TieProtoInfo>& protos,
         break;
       case GameVersion::Jak2:
       case GameVersion::Jak3:
+      case GameVersion::JakX:
         info = get_jak2_tie_category(proto.proto_flag);
         break;
       default:
         ASSERT_NOT_REACHED();
     }
-    u32 envmap_tex_idx;
+    s32 envmap_tex_idx;
     DrawMode envmap_drawmode;
     if (info.uses_envmap) {
       envmap_tex_idx = get_or_add_texture(proto.envmap_adgif.value().combo_tex, lev, tdb);
@@ -2738,17 +2747,35 @@ std::string dump_full_to_obj(const std::vector<TieProtoInfo>& protos,
     }
     for (auto& inst : proto.instances) {
       auto& mat = inst.mat;
+      auto nmat = tie_normal_transform_v2(mat);
+
+      bool has_normals = false;
+      for (auto& frag : proto.frags) {
+        for (auto& strip : frag.strips) {
+          int vert_idx = 0;
+          while (vert_idx < (int)strip.verts.size()) {
+            math::Vector<s8, 3> nrm = strip.verts.at(vert_idx).nrm;
+            if (nrm.x() || nrm.y() || nrm.z()) {
+              has_normals = true;
+              goto foundNormals;
+            }
+            vert_idx++;
+          }
+        }
+      }
+      foundNormals:;
+
       int frag_idx = 0;
       for (auto& frag : proto.frags) {
         for (auto& strip : frag.strips) {
-          u32 tex = get_or_add_texture(strip.adgif.combo_tex, lev, tdb);
+          s32 tex = get_or_add_texture(strip.adgif.combo_tex, lev, tdb);
           DrawMode mode = process_draw_mode(strip.adgif, frag.prog_info.misc_x == 0,
                                             frag.has_magic_tex0_bit, version, info.category);
           MatKey key;
           if (info.uses_envmap)
-            key = {tex, mode.as_int(), envmap_tex_idx, envmap_drawmode.as_int(), true};
+            key = {tex, mode.as_int(), envmap_tex_idx, envmap_drawmode.as_int(), true, proto.proto_flag};
           else
-            key = {tex, mode.as_int(), 0, 0, false};
+            key = {tex, mode.as_int(), 0, 0, false, proto.proto_flag};
           // add verts...
           ASSERT(strip.verts.size() >= 3);
 
@@ -2759,20 +2786,25 @@ std::string dump_full_to_obj(const std::vector<TieProtoInfo>& protos,
           int q_idx = 0;
           int startup = 0;
           while (vert_idx < (int)strip.verts.size()) {
-            TieAllVertex v;
-            v.pos = transform_tie(mat, strip.verts.at(vert_idx).pos) / 4096;
-            v.tex = strip.verts.at(vert_idx).tex;
-            v.envmap_tint_color = strip.verts.at(vert_idx).envmap_tint_color;
-            auto nmat = tie_normal_transform_v2(mat);
-            v.nrm += nmat[0] * strip.verts.at(vert_idx).nrm.x();
-            v.nrm += nmat[1] * strip.verts.at(vert_idx).nrm.y();
-            v.nrm += nmat[2] * strip.verts.at(vert_idx).nrm.z();
-            v.nrm.normalize();
-            v.color_index =
-                inst.frags.at(frag_idx).color_indices.at(strip.verts.at(vert_idx).color_index_index) +
+            TieProtoVertex vertIn = strip.verts.at(vert_idx);
+            TieAllVertex vertOut;
+            vertOut.pos = transform_tie(mat, vertIn.pos) / 4096;
+            vertOut.tex = strip.verts.at(vert_idx).tex;
+            vertOut.envmap_tint_color = vertIn.envmap_tint_color;
+            if (has_normals) {
+              vertOut.nrm = math::Vector3f(0, 0, 0);  // Whoops, forgot to initialize...
+              vertOut.nrm += nmat[0] * vertIn.nrm.x();
+              vertOut.nrm += nmat[1] * vertIn.nrm.y();
+              vertOut.nrm += nmat[2] * vertIn.nrm.z();
+              vertOut.nrm.normalize();
+            } else {
+              vertOut.nrm = math::Vector3f(0, 0, 0);
+            }
+            vertOut.color_index =
+                inst.frags.at(frag_idx).color_indices.at(vertIn.color_index_index) +
                 inst.frags.at(frag_idx).color_index_offset_in_big_palette;
 
-            int idx = get_or_add_vertex(v, unique_verts, lookup);
+            int idx = get_or_add_vertex(vertOut, unique_verts, lookup);
 
             idx++;
             vtx_idx_queue[q_idx++] = idx;
@@ -2817,10 +2849,10 @@ std::string dump_full_to_obj(const std::vector<TieProtoInfo>& protos,
     result += fmt::format("vn {} {} {}\n", v.nrm.x(), v.nrm.y(), v.nrm.z());
   }
   for (auto& [key, face_list] : grouped_faces) {
-    if (key.uses_envmap)
-      result += fmt::format("d texture:{} drawmode:{} envtexture:{} envdrawmode:{}\n", key.tex, key.mode, key.envtex, key.envmode);
+    if (!key.uses_envmap)
+      result += fmt::format("d texture:{} drawmode:{} flags:{}\n", key.tex, key.mode, key.proto_flags);
     else
-      result += fmt::format("d texture:{} drawmode:{}\n", key.tex, key.mode);
+      result += fmt::format("d texture:{} drawmode:{} flags:{} envtexture:{} envdrawmode:{}\n", key.tex, key.mode, key.proto_flags, key.envtex, key.envmode);
 
     for (auto& f : face_list) {
       result += fmt::format("f {} {} {}\n", f.x(), f.y(), f.z());
@@ -3220,7 +3252,7 @@ nlohmann::json extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
   //tie_tree_info = nlohmann::json::array();
   for (int geo = 0; geo < GEOM_MAX; ++geo) {
     // as far as I can tell, this one has bad colors
-    if (debug_name == "PRECD.DGO-2-tie" && geo == 3) {
+    if (debug_name == "PRECD.DGO-1-tie" && geo == 3) {
       continue;
     }
     tfrag3::TieTree this_tree;
@@ -3288,7 +3320,7 @@ nlohmann::json extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
       file_util::create_dir_if_needed(tie_proto_path);
       tie_tree_info["protos"] = nlohmann::json::array();
       for (auto& proto : info) {
-        if (proto.stiffness == 0)
+        if (proto.stiffness == 0 && !isProtoToggleable(out.level_name, proto.name, version))
           continue;
         nlohmann::json proto_json;
         auto data = debug_dump_proto_to_obj(proto, out, tex_db, version);

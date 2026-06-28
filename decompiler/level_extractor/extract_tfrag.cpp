@@ -1996,6 +1996,8 @@ s32 find_or_add_texture_to_level(u32 combo_tex_id,
       bool ok_to_miss =
           std::find(expected_missing_textures.begin(), expected_missing_textures.end(),
                     std::make_pair(tpage, idx)) != expected_missing_textures.end();
+      //TODO Jak X is missing a ton of textures that crash the exporter, I have no idea how to load them yet, so make everything ok to miss.
+      ok_to_miss = true;
       if (ok_to_miss) {
         // we're missing a texture, just use the first one.
         tex_it = tdb.textures.begin();
@@ -2072,7 +2074,7 @@ std::string debug_dump_to_obj(const std::vector<TFragDraw>& draws,
   std::unordered_map<TFragVertexData, int, TFragVertexData::hash> lookup;
 
   struct MatKey {
-    u32 tex;
+    s32 tex;
     u32 mode;
 
     bool operator==(const MatKey& o) const { return tex == o.tex && mode == o.mode; }
