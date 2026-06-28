@@ -513,6 +513,8 @@ struct Hfragment {
   DrawMode draw_mode;
   u32 occlusion_offset;
 
+  bool exists = false;
+
   void serialize(Serializer& ser);
   void memory_usage(MemoryUsageTracker* tracker) const;
 };
