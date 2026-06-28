@@ -1859,74 +1859,71 @@ void fill_res_with_value_types(Res& res_tag, const Ref& data) {
 
 void EntityActor::read_from_file(TypedRef ref,
                                  const decompiler::DecompilerTypeSystem& dts,
-                                 GameVersion /*version*/) {
+                                 GameVersion version) {
   trans.read_from_file(get_field_ref(ref, "trans", dts));
   aid = read_plain_data_field<u32>(ref, "aid", dts);
 
-  if (get_word_kind_for_field(ref, "nav-mesh", dts) == decompiler::LinkedWord::PTR) {
-    nav_mesh.exists = true;
-    TypedRef NavTRef = get_and_check_ref_to_basic(ref, "nav-mesh", "nav-mesh", dts);
+  if (version == GameVersion::Jak1) {
+    if (get_word_kind_for_field(ref, "nav-mesh", dts) == decompiler::LinkedWord::PTR) {
+      nav_mesh.exists = true;
+      TypedRef NavTRef = get_and_check_ref_to_basic(ref, "nav-mesh", "nav-mesh", dts);
 
+      // Spent couple hours trying to find why static-sphere was always empty,
+      // they get populated at runtime from the lump. :HuTaoFacePalm:
 
-    //Spent couple hours trying to find why static-sphere was always empty,
-    //they get populated at runtime from the lump. :HuTaoFacePalm:
+      nav_mesh.bounds.read_from_file(get_field_ref(NavTRef, "bounds", dts));
+      nav_mesh.origin.read_from_file(get_field_ref(NavTRef, "origin", dts));
 
-    nav_mesh.bounds.read_from_file(get_field_ref(NavTRef, "bounds", dts));
-    nav_mesh.origin.read_from_file(get_field_ref(NavTRef, "origin", dts));
+      nav_mesh.node_count = read_plain_data_field<int>(NavTRef, "node-count", dts);
+      nav_mesh.nodes.reserve(nav_mesh.vertex_count);
+      Ref NodesRef = deref_label(get_field_ref(NavTRef, "nodes", dts));
+      //NodesRef.byte_offset += 16;  // Skip inline array header
+      for (int i = 0; i < nav_mesh.node_count; i++) {
+        TypedRef NodesTRef(NodesRef, dts.ts.lookup_type("nav-node"));
+        // memcpy_plain_data(reinterpret_cast<u8*>(&node), NodesRef, sizeof(Nav_Node));
+        auto& node = nav_mesh.nodes.emplace_back();
+        node.center_x = read_plain_data_field<float>(NodesTRef, "center-x", dts);
+        node.center_y = read_plain_data_field<float>(NodesTRef, "center-y", dts);
+        node.center_z = read_plain_data_field<float>(NodesTRef, "center-z", dts);
+        node.type = read_plain_data_field<u16>(NodesTRef, "type", dts);
+        node.parent_offset = read_plain_data_field<u16>(NodesTRef, "parent-offset", dts);
+        node.radius_x = read_plain_data_field<float>(NodesTRef, "radius-x", dts);
+        node.radius_y = read_plain_data_field<float>(NodesTRef, "radius-y", dts);
+        node.radius_z = read_plain_data_field<float>(NodesTRef, "radius-z", dts);
+        node.left_offset = read_plain_data_field<u16>(NodesTRef, "left-offset", dts);
+        node.right_offset = read_plain_data_field<u16>(NodesTRef, "right-offset", dts);
+        // node.scale_x = read_plain_data_field<float>(NodesTRef, "scale-x", dts);
+        memcpy_plain_data(reinterpret_cast<u8*>(node.first_tris),
+                          get_field_ref(NodesTRef, "first-tris", dts), 4);
+        // node.scale_z = read_plain_data_field<float>(NodesTRef, "scale-z", dts);
+        memcpy_plain_data(reinterpret_cast<u8*>(node.last_tris),
+                          get_field_ref(NodesTRef, "last-tris", dts), 4);
+        // Advance pointer
+        NodesRef.byte_offset += sizeof(Nav_Node);
+      }
 
+      nav_mesh.vertex_count = read_plain_data_field<int>(NavTRef, "vertex-count", dts);
+      nav_mesh.vertex.reserve(nav_mesh.vertex_count);
+      Ref VertRef = deref_label(get_field_ref(NavTRef, "vertex", dts));
+      //VertRef.byte_offset += 16;  // Skip inline array header
+      for (int i = 0; i < nav_mesh.vertex_count; i++) {
+        auto& vert = nav_mesh.vertex.emplace_back();
+        memcpy_plain_data(reinterpret_cast<u8*>(vert.data), VertRef, sizeof(Vector));
+        // Advance pointer
+        VertRef.byte_offset += sizeof(Vector);
+      }
 
-    nav_mesh.node_count = read_plain_data_field<int>(NavTRef, "node-count", dts);
-    nav_mesh.nodes.reserve(nav_mesh.vertex_count);
-    Ref NodesRef = deref_label(get_field_ref(NavTRef, "nodes", dts));
-    NodesRef.byte_offset += 16;  // Skip inline array header
-    for (int i = 0; i < nav_mesh.node_count; i++) {
-      TypedRef NodesTRef(NodesRef, dts.ts.lookup_type("nav-node"));
-      // memcpy_plain_data(reinterpret_cast<u8*>(&node), NodesRef, sizeof(Nav_Node));
-      auto& node = nav_mesh.nodes.emplace_back();
-      node.center_x = read_plain_data_field<float>(NodesTRef, "center-x", dts);
-      node.center_y = read_plain_data_field<float>(NodesTRef, "center-y", dts);
-      node.center_z = read_plain_data_field<float>(NodesTRef, "center-z", dts);
-      node.type = read_plain_data_field<u16>(NodesTRef, "type", dts);
-      node.parent_offset = read_plain_data_field<u16>(NodesTRef, "parent-offset", dts);
-      node.radius_x = read_plain_data_field<float>(NodesTRef, "radius-x", dts);
-      node.radius_y = read_plain_data_field<float>(NodesTRef, "radius-y", dts);
-      node.radius_z = read_plain_data_field<float>(NodesTRef, "radius-z", dts);
-      node.left_offset = read_plain_data_field<u16>(NodesTRef, "left-offset", dts);
-      node.right_offset = read_plain_data_field<u16>(NodesTRef, "right-offset", dts);
-      //node.scale_x = read_plain_data_field<float>(NodesTRef, "scale-x", dts);
-      memcpy_plain_data(reinterpret_cast<u8*>(node.first_tris), get_field_ref(NodesTRef, "first-tris", dts), 4);
-      //node.scale_z = read_plain_data_field<float>(NodesTRef, "scale-z", dts);
-      memcpy_plain_data(reinterpret_cast<u8*>(node.last_tris), get_field_ref(NodesTRef, "last-tris", dts), 4);
-      // Advance pointer
-      NodesRef.byte_offset += 16;
-    }
-    
+      nav_mesh.poly_count = read_plain_data_field<int>(NavTRef, "poly-count", dts);
+      nav_mesh.poly.reserve(nav_mesh.poly_count);
+      Ref PolyRef = deref_label(get_field_ref(NavTRef, "poly", dts));
+      //PolyRef.byte_offset += 16;  // Skip inline array header
+      for (int i = 0; i < nav_mesh.poly_count; i++) {
+        auto& poly = nav_mesh.poly.emplace_back();
 
-    nav_mesh.vertex_count = read_plain_data_field<int>(NavTRef, "vertex-count", dts);
-    nav_mesh.vertex.reserve(nav_mesh.vertex_count);
-    Ref VertRef = deref_label(get_field_ref(NavTRef, "vertex", dts));
-    VertRef.byte_offset += 16;  //Skip inline array header
-    for (int i = 0; i < nav_mesh.vertex_count; i++) {
-      auto& vert = nav_mesh.vertex.emplace_back();
-      memcpy_plain_data(reinterpret_cast<u8*>(vert.data), VertRef, sizeof(Vector));
-      //Advance pointer
-      VertRef.byte_offset += 16;
-    }
+        memcpy_plain_data(reinterpret_cast<u8*>(&poly), PolyRef, sizeof(Nav_Poly));
 
-
-    nav_mesh.poly_count = read_plain_data_field<int>(NavTRef, "poly-count", dts);
-    nav_mesh.poly.reserve(nav_mesh.poly_count);
-    Ref PolyRef = deref_label(get_field_ref(NavTRef, "poly", dts));
-    PolyRef.byte_offset += 16;  // Skip inline array header
-    for (int i = 0; i < nav_mesh.poly_count; i++) {
-      TypedRef PolyTRef(PolyRef, dts.ts.lookup_type("nav-poly"));
-      auto& poly = nav_mesh.poly.emplace_back();
-      poly.id = read_plain_data_field<u8>(PolyTRef, "id", dts);
-      memcpy_plain_data(reinterpret_cast<u8*>(poly.vertex), PolyRef, 3);
-      memcpy_plain_data(reinterpret_cast<u8*>(poly.adj_poly), PolyRef, 3);
-      poly.pat = read_plain_data_field<u8>(PolyTRef, "pat", dts);
-      // Advance pointer
-      PolyRef.byte_offset += 8;
+        PolyRef.byte_offset += sizeof(Nav_Poly);
+      }
     }
   }
 
