@@ -1402,6 +1402,29 @@
   "robocave-vis"
   )
 
+;;;;;;;;;;;;;;;;;;;;;
+;; yosemite
+;;;;;;;;;;;;;;;;;;;;;
+
+(cgo "YOS.DGO" "yos.gd")
+
+(copy-textures 1332 1334 1333 1331)
+
+(copy-gos
+  "yosemite-vis"
+  )
+
+;;;;;;;;;;;;;;;;;;;;;
+;; BS.DGO
+;;;;;;;;;;;;;;;;;;;;;
+
+(cgo "BS.DGO" "bs.gd")
+
+(copy-textures 404 73 677 942)
+
+(copy-gos
+  "bs"
+  )
 
 ;;;;;;;;;;;;;;;;;;;;;
 ;; lavatube

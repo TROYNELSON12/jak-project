@@ -1,0 +1,12 @@
+("BS.DGO"
+  (
+    "tpage-404.go"
+    "tpage-73.go"
+    "tpage-677.go"
+    "tpage-942.go"
+    "flutflut-plat-large-ag.go"
+    "flutflut-plat-med-ag.go"
+    "flutflut-plat-small-ag.go"
+    "bs.go"
+  )
+)
